@@ -1,0 +1,23 @@
+# Ignore build and output files
+**/build/
+out/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+**/CMakeLists.txt
+**/sdkconfig*
+**/README.md
+
+# Ignore IDE-specific files
+**/.vscode/
+**/.devcontainer/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Ignore dependency libraries
+node_modules/
+venv/
+__pycache__/
