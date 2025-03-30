@@ -1,8 +1,10 @@
 /**
- * ESP32 WiFi Station with Packet Receiver
+ * ESP32 WiFi Station with Connection and Packet Receiver
  * 
- * This implementation receives and processes control and data packets
- * from the AP scheduler.
+ * This implementation connects to a WiFi network first and then
+ * receives and processes control and data packets from the AP scheduler.
+ * 
+ * Updated to fix control packet recognition issues.
  */
 
 #include <string.h>
@@ -22,7 +24,6 @@
 /* WiFi configuration */
 #define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
 #define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
-#define EXAMPLE_ESP_WIFI_CHANNEL   CONFIG_ESP_WIFI_CHANNEL  /* Match this with AP */
 #define EXAMPLE_ESP_MAXIMUM_RETRY  CONFIG_ESP_MAXIMUM_RETRY
 
 /* Packet receiver configuration */
@@ -31,6 +32,22 @@
 #define PROMISCUOUS_FILTER_MASK   WIFI_PROMIS_FILTER_MASK_DATA  // Only receive data frames
 #define RX_TASK_STACK_SIZE        4096
 #define RX_TASK_PRIORITY          5
+
+/* Packet type identifier */
+#define CONTROL_PACKET_SIGNATURE  0xA5B6C7D8
+
+/* FreeRTOS event group to signal when we are connected */
+static EventGroupHandle_t s_wifi_event_group;
+
+/* The event group allows multiple bits for each event, but we only care about two events:
+ * - we are connected to the AP with an IP
+ * - we failed to connect after the maximum amount of retries */
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
+
+static const char *TAG = "wifi-sta-receiver";
+
+static int s_retry_num = 0;
 
 /* Class definitions */
 typedef enum {
@@ -48,14 +65,23 @@ typedef enum {
     DATA_TYPE_DOUBLE = 4,        // 64-bit double
 } data_type_t;
 
+/* Packet type definition */
+typedef enum __attribute__((packed)) {
+    PACKET_TYPE_CONTROL = 0,
+    PACKET_TYPE_DATA = 1
+} packet_type_t;
+
 /* Control packet structure - received before data transmission */
 typedef struct {
+    uint32_t signature;           // Signature to identify control packets
+    packet_type_t packet_type;    // Always PACKET_TYPE_CONTROL
     uint8_t class_counts[MAX_CLASSES]; // Number of elements for each class
     data_type_t class_types[MAX_CLASSES]; // Data type for each class
 } __attribute__((packed)) control_packet_t;
 
 /* Data packet header structure */
 typedef struct {
+    packet_type_t packet_type;    // Always PACKET_TYPE_DATA
     uint8_t class_counts[MAX_CLASSES]; // Number of items for each class
     uint16_t total_size;          // Total size of all data in bytes
     uint32_t timestamp;           // Transmission timestamp
@@ -79,19 +105,6 @@ typedef struct {
     uint32_t error_packets;          // Packets with errors
     uint32_t current_time_ms;        // Current time in milliseconds
 } receiver_context_t;
-
-/* FreeRTOS event group to signal when we are connected */
-static EventGroupHandle_t s_wifi_event_group;
-
-/* The event group allows multiple bits for each event, but we only care about two events:
- * - we are connected to the AP with an IP
- * - we failed to connect after the maximum amount of retries */
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
-
-static const char *TAG = "wifi-sta-receiver";
-
-static int s_retry_num = 0;
 
 /* Global receiver context */
 static receiver_context_t receiver_ctx;
@@ -159,17 +172,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
                 ESP_LOGI(TAG, "Connected to AP successfully!");
                 break;
                 
-            case WIFI_EVENT_STA_DISCONNECTED: {
-                wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t*) event_data;
-                ESP_LOGW(TAG, "Disconnected from AP, reason: %d", event->reason);
-                
-                // Print SSID we tried to connect to
-                char ssid[33] = {0};
-                if (event->ssid_len > 0 && event->ssid_len < 33) {
-                    memcpy(ssid, event->ssid, event->ssid_len);
-                    ESP_LOGW(TAG, "Failed SSID: '%s'", ssid);
-                }
-                
+            case WIFI_EVENT_STA_DISCONNECTED:
                 if (s_retry_num < EXAMPLE_ESP_MAXIMUM_RETRY) {
                     esp_wifi_connect();
                     s_retry_num++;
@@ -179,7 +182,6 @@ static void event_handler(void* arg, esp_event_base_t event_base,
                     ESP_LOGI(TAG, "Failed to connect to AP after maximum retries");
                 }
                 break;
-            }
                 
             default:
                 ESP_LOGI(TAG, "Other WiFi event: %ld", event_id);
@@ -190,24 +192,10 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Got IP address: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        
-        // After successful connection, enable promiscuous mode for packet capture
-        ESP_LOGI(TAG, "Enabling promiscuous mode for packet capture");
-        
-        // Set filter for all packet types initially, then narrow down
-        wifi_promiscuous_filter_t filter = {
-            .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL
-        };
-        esp_wifi_set_promiscuous_filter(&filter);
-        
-        // Register callback and enable promiscuous mode
-        esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_rx_cb);
-        esp_wifi_set_promiscuous(true);
-        
-        ESP_LOGI(TAG, "Promiscuous mode enabled successfully");
     }
 }
 
+/* Initialize WiFi in station mode and connect to AP */
 void wifi_init_sta(void)
 {
     ESP_LOGI(TAG, "Initializing WiFi in station mode");
@@ -222,21 +210,23 @@ void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     // Register event handlers
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
                                                         ESP_EVENT_ANY_ID,
                                                         &event_handler,
                                                         NULL,
-                                                        NULL));
+                                                        &instance_any_id));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
                                                         IP_EVENT_STA_GOT_IP,
                                                         &event_handler,
                                                         NULL,
-                                                        NULL));
+                                                        &instance_got_ip));
 
     // Configure WiFi station with hardcoded SSID and password to ensure match
-    // Replace these with your actual AP SSID and password
-    const char* wifi_ssid = "myssid";  // MUST MATCH YOUR AP SSID EXACTLY
-    const char* wifi_password = "mypassword";  // MUST MATCH YOUR AP PASSWORD EXACTLY
+    // These MUST match exactly with the AP configuration
+    const char* wifi_ssid = "myssid";  // MUST MATCH AP SSID
+    const char* wifi_password = "mypassword";  // MUST MATCH AP PASSWORD
     
     wifi_config_t wifi_config = {0};
     
@@ -253,17 +243,12 @@ void wifi_init_sta(void)
     ESP_LOGI(TAG, "  SSID: %s", wifi_config.sta.ssid);
     ESP_LOGI(TAG, "  Password: %s", "********");  // Don't log actual password
     
-    // Set the station to the same channel as your AP (e.g., 1)
+    // Configure WiFi and start
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    
-    // Set fixed channel to match AP if needed
-    // Uncomment and set to your AP's channel
-    //ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
-    
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi station initialization completed");
+    ESP_LOGI(TAG, "WiFi station initialization completed, waiting for connection");
 
     /* Wait until either the connection is established or connection failed */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
@@ -277,67 +262,27 @@ void wifi_init_sta(void)
         ESP_LOGI(TAG, "Connected to SSID: %s", wifi_config.sta.ssid);
     } else if (bits & WIFI_FAIL_BIT) {
         ESP_LOGE(TAG, "Failed to connect to SSID: %s", wifi_config.sta.ssid);
-        
-        // If we failed to connect normally, enable promiscuous mode anyway
-        // This allows us to see packets even without an established connection
-        ESP_LOGI(TAG, "Enabling promiscuous mode without connection");
-        
-        wifi_promiscuous_filter_t filter = {
-            .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL  // Capture all packet types initially
-        };
-        esp_wifi_set_promiscuous_filter(&filter);
-        esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_rx_cb);
-        esp_wifi_set_promiscuous(true);
-        
-        // Scan for available networks to find out what's actually there
-        ESP_LOGI(TAG, "Scanning for available networks...");
-        wifi_scan_config_t scan_config = {
-            .ssid = NULL,
-            .bssid = NULL,
-            .channel = 0,
-            .show_hidden = true,
-            .scan_type = WIFI_SCAN_TYPE_ACTIVE,
-            .scan_time.active.min = 100,
-            .scan_time.active.max = 300,
-        };
-        esp_wifi_scan_start(&scan_config, true);
-        
-        // Get scan results
-        uint16_t ap_count = 0;
-        esp_wifi_scan_get_ap_num(&ap_count);
-        
-        if (ap_count > 0) {
-            wifi_ap_record_t *ap_records = calloc(ap_count, sizeof(wifi_ap_record_t));
-            if (ap_records) {
-                ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_count, ap_records));
-                
-                ESP_LOGI(TAG, "Found %d access points:", ap_count);
-                for (int i = 0; i < ap_count; i++) {
-                    ESP_LOGI(TAG, "  %d: SSID '%s', Channel %d, RSSI %d", 
-                            i, ap_records[i].ssid, ap_records[i].primary, ap_records[i].rssi);
-                }
-                
-                // Try to find and match channel with our target SSID
-                for (int i = 0; i < ap_count; i++) {
-                    if (strcmp((char*)ap_records[i].ssid, wifi_ssid) == 0) {
-                        ESP_LOGI(TAG, "Found our target AP! Channel: %d, RSSI: %d", 
-                                ap_records[i].primary, ap_records[i].rssi);
-                        
-                        // Set our channel to match the found AP
-                        ESP_LOGI(TAG, "Setting channel to %d", ap_records[i].primary);
-                        esp_wifi_set_channel(ap_records[i].primary, WIFI_SECOND_CHAN_NONE);
-                        break;
-                    }
-                }
-                
-                free(ap_records);
-            }
-        } else {
-            ESP_LOGI(TAG, "No access points found in scan");
-        }
     } else {
         ESP_LOGE(TAG, "Unexpected event during connection");
     }
+}
+
+/* Enable promiscuous mode for packet capturing */
+static void enable_promiscuous_mode(void)
+{
+    ESP_LOGI(TAG, "Enabling promiscuous mode for packet capture");
+    
+    // Set filter for data packets
+    wifi_promiscuous_filter_t filter = {
+        .filter_mask = PROMISCUOUS_FILTER_MASK
+    };
+    esp_wifi_set_promiscuous_filter(&filter);
+    
+    // Register callback and enable promiscuous mode
+    esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_rx_cb);
+    esp_wifi_set_promiscuous(true);
+    
+    ESP_LOGI(TAG, "Promiscuous mode enabled successfully");
 }
 
 /* WiFi promiscuous mode callback */
@@ -362,7 +307,6 @@ static void wifi_promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
     uint8_t frame_control_1 = payload[0];
     uint8_t frame_control_2 = payload[1];
     uint8_t frame_type = (frame_control_1 & 0x0C);
-    //uint8_t frame_subtype = (frame_control_1 & 0xF0) >> 4;
     uint8_t from_ds = (frame_control_2 & 0x02) >> 1;
     uint8_t to_ds = (frame_control_2 & 0x01);
     
@@ -415,8 +359,11 @@ static void wifi_promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
     const uint8_t *data = payload + 24;
     size_t data_len = pkt->rx_ctrl.sig_len - 24;
     
-    // Check packet size - we need at least sizeof(control_packet_t) or sizeof(data_packet_header_t)
-    if (data_len < sizeof(control_packet_t)) {
+    // Debug: Log the packet size for every packet
+    ESP_LOGD(TAG, "Received packet size: %d bytes", data_len);
+    
+    // Make sure we have at least enough data to check the packet type
+    if (data_len < 4) {
         if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
             receiver_ctx.error_packets++;
             xSemaphoreGive(receiver_ctx.mutex);
@@ -425,19 +372,37 @@ static void wifi_promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
         return;
     }
     
-    // Determine if this is a control or data packet
-    // Control packet is smaller, so we check size compared to data packet header
-    if (data_len == sizeof(control_packet_t)) {
-        process_control_packet(data, data_len);
-    } else if (data_len >= sizeof(data_packet_header_t)) {
-        process_data_packet(data, data_len);
-    } else {
-        // Unexpected packet size
-        if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
-            receiver_ctx.error_packets++;
-            xSemaphoreGive(receiver_ctx.mutex);
+    // Check for control packet signature
+    const uint32_t *signature = (const uint32_t *)data;
+    if (*signature == CONTROL_PACKET_SIGNATURE) {
+        if (data_len >= sizeof(control_packet_t)) {
+            process_control_packet(data, data_len);
+        } else {
+            ESP_LOGW(TAG, "Control packet too small: %d bytes (expected %d)", 
+                    data_len, sizeof(control_packet_t));
         }
-        ESP_LOGW(TAG, "Received packet with unexpected size: %d bytes", data_len);
+    } else {
+        // If it's not a control packet, check if it's a data packet
+        if (data_len >= sizeof(data_packet_header_t)) {
+            // Check packet type field
+            const packet_type_t *type = (const packet_type_t *)(data);
+            if (*type == PACKET_TYPE_DATA) {
+                process_data_packet(data, data_len);
+            } else {
+                ESP_LOGW(TAG, "Unknown packet type: %d", *type);
+                if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
+                    receiver_ctx.error_packets++;
+                    xSemaphoreGive(receiver_ctx.mutex);
+                }
+            }
+        } else {
+            // Unexpected packet size
+            if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
+                receiver_ctx.error_packets++;
+                xSemaphoreGive(receiver_ctx.mutex);
+            }
+            ESP_LOGW(TAG, "Received packet with unexpected size: %d bytes", data_len);
+        }
     }
 }
 
@@ -452,6 +417,17 @@ static void process_control_packet(const uint8_t *data, size_t length)
     
     // Cast to control packet structure
     const control_packet_t *control = (const control_packet_t *)data;
+    
+    // Verify signature and packet type
+    if (control->signature != CONTROL_PACKET_SIGNATURE) {
+        ESP_LOGE(TAG, "Invalid control packet signature: 0x%08lx", (unsigned long)control->signature);
+        return;
+    }
+    
+    if (control->packet_type != PACKET_TYPE_CONTROL) {
+        ESP_LOGE(TAG, "Invalid packet type in control packet: %d", control->packet_type);
+        return;
+    }
     
     // Store control packet information
     if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
@@ -484,6 +460,12 @@ static void process_data_packet(const uint8_t *data, size_t length)
     
     // Cast to data packet header structure
     const data_packet_header_t *header = (const data_packet_header_t *)data;
+    
+    // Verify packet type
+    if (header->packet_type != PACKET_TYPE_DATA) {
+        ESP_LOGE(TAG, "Invalid packet type in data packet: %d", header->packet_type);
+        return;
+    }
     
     // Make sure we have received a control packet first
     bool have_control_packet = false;
@@ -634,6 +616,8 @@ static void receiver_task(void *pvParameters)
             ESP_LOGI(TAG, "  Control packets: %lu", receiver_ctx.control_packets);
             ESP_LOGI(TAG, "  Data packets: %lu", receiver_ctx.data_packets);
             ESP_LOGI(TAG, "  Error packets: %lu", receiver_ctx.error_packets);
+            ESP_LOGI(TAG, "  Control packet received: %s", 
+                     receiver_ctx.control_packet_received ? "YES" : "NO");
             xSemaphoreGive(receiver_ctx.mutex);
         }
     }
@@ -650,34 +634,16 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize WiFi in station mode with minimal setup
-    ESP_LOGI(TAG, "Initializing WiFi in promiscuous mode");
-    
-    // Initialize the TCP/IP stack
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    
-    // Initialize WiFi with default config
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    
-    // Set to the same channel as your AP
-    ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
-    
-    // Enable promiscuous mode for packet capture
-    ESP_LOGI(TAG, "Enabling promiscuous mode for packet capture");
-    wifi_promiscuous_filter_t filter = {
-        .filter_mask = WIFI_PROMIS_FILTER_MASK_ALL  // Capture all packets
-    };
-    esp_wifi_set_promiscuous_filter(&filter);
-    esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_rx_cb);
-    esp_wifi_set_promiscuous(true);
+    // Initialize WiFi and connect to AP
+    ESP_LOGI(TAG, "Starting WiFi station");
+    wifi_init_sta();
+
+    // After WiFi connection is established, enable promiscuous mode for packet capture
+    enable_promiscuous_mode();
     
     // Initialize packet receiver
     ESP_LOGI(TAG, "Initializing packet receiver");
     receiver_init();
     
-    ESP_LOGI(TAG, "Station in promiscuous mode, waiting for packets");
+    ESP_LOGI(TAG, "Station ready, waiting for packets");
 }
