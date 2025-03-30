@@ -57,6 +57,12 @@ typedef struct {
     uint8_t data[MAX_PACKET_SIZE]; // Packet data
 } queue_packet_t;
 
+/* Packet type definition - Match with station code */
+typedef enum __attribute__((packed)) {
+    PACKET_TYPE_CONTROL = 0,
+    PACKET_TYPE_DATA = 1
+} packet_type_t;
+
 /* Node structure for the linked list queue */
 typedef struct queue_node {
     queue_packet_t packet;
@@ -71,13 +77,19 @@ typedef struct {
 } packet_queue_t;
 
 /* Control packet structure - sent before data transmission */
+/* Packet type identifier - Match with station code */
+#define CONTROL_PACKET_SIGNATURE  0xA5B6C7D8
+
 typedef struct {
+    uint32_t signature;           // Signature to identify control packets (0xA5B6C7D8)
+    packet_type_t packet_type;    // Always PACKET_TYPE_CONTROL
     uint8_t class_counts[MAX_CLASSES]; // Number of elements for each class
     data_type_t class_types[MAX_CLASSES]; // Data type for each class
 } __attribute__((packed)) control_packet_t;
 
 /* Data packet (for transmission not in queue) header structure */
 typedef struct {
+    packet_type_t packet_type;    // Always PACKET_TYPE_DATA
     uint8_t class_counts[MAX_CLASSES]; // Number of items for each class
     uint16_t total_size;          // Total size of all data in bytes
     uint32_t timestamp;           // Transmission timestamp
@@ -98,6 +110,7 @@ typedef struct {
     uint32_t deadline_misses;     // Packets that missed deadlines
     uint32_t current_time_ms;     // Current time in milliseconds
 } scheduler_context_t;
+
 
 /* Global scheduler context */
 static scheduler_context_t scheduler_ctx;
@@ -209,8 +222,6 @@ static bool queue_peek(packet_queue_t *queue, queue_packet_t *packet) {
     memcpy(packet, &queue->head->packet, sizeof(queue_packet_t));
     return true;
 }
-
-/* Return number of packets in queue */
 
 /* WiFi event handler */
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -601,6 +612,10 @@ static esp_err_t send_control_packet(void)
     
     control_packet_t control_packet = {0};
     
+    // Set signature and packet type
+    control_packet.signature = CONTROL_PACKET_SIGNATURE;
+    control_packet.packet_type = PACKET_TYPE_CONTROL;
+    
     // Get class information
     if (xSemaphoreTake(scheduler_ctx.mutex, portMAX_DELAY) == pdTRUE) {
         // Set data types
@@ -660,7 +675,8 @@ static esp_err_t send_control_packet(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send control packet: %s", esp_err_to_name(ret));
     } else {
-        ESP_LOGI(TAG, "Sent control packet: Class1=%d(%d), Class2=%d(%d), Class3=%d(%d)",
+        ESP_LOGI(TAG, "Sent control packet with signature 0x%08lx: Class1=%d(%d), Class2=%d(%d), Class3=%d(%d)",
+                (unsigned long)control_packet.signature,
                 control_packet.class_counts[0], control_packet.class_types[0],
                 control_packet.class_counts[1], control_packet.class_types[1],
                 control_packet.class_counts[2], control_packet.class_types[2]);
@@ -680,6 +696,7 @@ static esp_err_t send_data_packet(uint8_t *data, uint16_t size, uint8_t class_co
     
     // Create data packet header
     data_packet_header_t header = {0};
+    header.packet_type = PACKET_TYPE_DATA;  // Set packet type
     header.total_size = size;
     header.timestamp = get_current_time_ms();
     
@@ -745,6 +762,11 @@ static void scheduler_task(void *pvParameters)
     TickType_t last_wake_time = xTaskGetTickCount();
     const TickType_t check_interval = pdMS_TO_TICKS(SCHEDULER_CHECK_INTERVAL_MS);
     
+    // After starting the task, immediately send a control packet
+    // to inform stations about class configurations
+    vTaskDelay(pdMS_TO_TICKS(1000));  // Wait for WiFi to fully initialize
+    send_control_packet();
+    
     while (1) {
         // Wait for the next check interval
         vTaskDelayUntil(&last_wake_time, check_interval);
@@ -769,6 +791,9 @@ void create_test_int32_packet(class_id_t class_id, uint16_t count)
         values[i] = i;
     }
     
+    // Make sure data type matches what we're sending
+    scheduler_set_class_type(class_id, DATA_TYPE_INT32);
+    
     // Submit packet with this data
     scheduler_submit_packet(class_id, values, count);
     
@@ -786,10 +811,38 @@ void create_test_float_packet(class_id_t class_id, uint16_t count)
         return;
     }
     
-    // Fill with sine wave values
+    // Fill with values
     for (int i = 0; i < count; i++) {
         values[i] = i * 0.1f;
     }
+    
+    // Make sure data type matches what we're sending
+    scheduler_set_class_type(class_id, DATA_TYPE_FLOAT);
+    
+    // Submit packet with this data
+    scheduler_submit_packet(class_id, values, count);
+    
+    // Free the temporary buffer
+    free(values);
+}
+
+/* Create a test int16 packet */
+void create_test_int16_packet(class_id_t class_id, uint16_t count)
+{
+    // Create array of int16 values
+    int16_t *values = malloc(count * sizeof(int16_t));
+    if (values == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for test data");
+        return;
+    }
+    
+    // Fill with sequential values
+    for (int i = 0; i < count; i++) {
+        values[i] = i * 10;
+    }
+    
+    // Make sure data type matches what we're sending
+    scheduler_set_class_type(class_id, DATA_TYPE_INT16);
     
     // Submit packet with this data
     scheduler_submit_packet(class_id, values, count);
@@ -837,38 +890,59 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing WiFi in AP mode");
     wifi_init_softap();
     
+    // Short delay to allow WiFi to initialize
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    
     // Initialize packet scheduler
     ESP_LOGI(TAG, "Initializing packet scheduler");
     scheduler_init();
     
+    // Set initial class types to match expected formats
+    scheduler_set_class_type(CLASS_1, DATA_TYPE_INT32);
+    scheduler_set_class_type(CLASS_2, DATA_TYPE_FLOAT);
+    scheduler_set_class_type(CLASS_3, DATA_TYPE_INT16);
+    
+    // Short delay to allow scheduler to initialize
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
     // Demo: Create test packets with different data types
-    ESP_LOGI(TAG, "Submitting test packets");
+    ESP_LOGI(TAG, "Submitting initial test packets");
     
     // Create test packets for each class
     create_test_int32_packet(CLASS_1, 10);  // Class 1: 10 INT32 values
     create_test_float_packet(CLASS_2, 8);   // Class 2: 8 FLOAT values
-    
-    // INT16 values for Class 3
-    int16_t test_int16[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-    scheduler_submit_packet(CLASS_3, test_int16, 10);
+    create_test_int16_packet(CLASS_3, 10);  // Class 3: 10 INT16 values
     
     // Periodic task for statistics and additional test packets
     int counter = 0;
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(50000));  // Every 50 seconds
+        // First create a more frequent schedule for initial testing
+        if (counter < 10) {
+            vTaskDelay(pdMS_TO_TICKS(5000));  // Every 5 seconds during initial phase
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10000));  // Every 10 seconds thereafter
+        }
         
         // Print statistics
         print_scheduler_stats();
         
         // Create additional test packets periodically
         counter++;
+        
+        // Generate different test data for each class
+        // Class 1 (INT32) - Period: 3 seconds
         if (counter % 3 == 0) {
-            create_test_int32_packet(CLASS_1, 5);
-        } else if (counter % 3 == 1) {
-            create_test_float_packet(CLASS_2, 4);
-        } else {
-            int16_t more_data[] = {100, 200, 300, 400, 500};
-            scheduler_submit_packet(CLASS_3, more_data, 5);
+            create_test_int32_packet(CLASS_1, 5 + (counter % 5));
+        }
+        
+        // Class 2 (FLOAT) - Period: 5 seconds  
+        if (counter % 2 == 0) {
+            create_test_float_packet(CLASS_2, 4 + (counter % 4));
+        }
+        
+        // Class 3 (INT16) - Period: 6 seconds
+        if (counter % 3 == 1) {
+            create_test_int16_packet(CLASS_3, 6 + (counter % 3));
         }
     }
 }
