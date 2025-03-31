@@ -19,6 +19,9 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 
+/* Include the terminal commands header */
+#include "terminal_cmd.h"
+
 /* WiFi configuration */
 #define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
 #define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
@@ -48,20 +51,20 @@ static const char *TAG = "wifi-sta-sender";
 static int s_retry_num = 0;
 
 /* Class definitions */
-typedef enum {
-    CLASS_1 = 0,                 // Class 1: 3-second period
-    CLASS_2 = 1,                 // Class 2: 5-second period
-    CLASS_3 = 2,                 // Class 3: 6-second period
-} class_id_t;
+// typedef enum {
+//     CLASS_1 = 0,                 // Class 1: 3-second period
+//     CLASS_2 = 1,                 // Class 2: 5-second period
+//     CLASS_3 = 2,                 // Class 3: 6-second period
+// } class_id_t;
 
-/* Data type definitions */
-typedef enum {
-    DATA_TYPE_INT8 = 0,          // 8-bit integer
-    DATA_TYPE_INT16 = 1,         // 16-bit integer
-    DATA_TYPE_INT32 = 2,         // 32-bit integer
-    DATA_TYPE_FLOAT = 3,         // 32-bit float
-    DATA_TYPE_DOUBLE = 4,        // 64-bit double
-} data_type_t;
+// /* Data type definitions */
+// typedef enum {
+//     DATA_TYPE_INT8 = 0,          // 8-bit integer
+//     DATA_TYPE_INT16 = 1,         // 16-bit integer
+//     DATA_TYPE_INT32 = 2,         // 32-bit integer
+//     DATA_TYPE_FLOAT = 3,         // 32-bit float
+//     DATA_TYPE_DOUBLE = 4,        // 64-bit double
+// } data_type_t;
 
 /* Internal queue packet structure */
 typedef struct {
@@ -95,6 +98,21 @@ typedef struct {
 } __attribute__((packed)) data_packet_header_t;
 
 /* Scheduler context */
+// typedef struct {
+//     packet_queue_t packet_queues[MAX_CLASSES]; // Separate queue for each class
+//     SemaphoreHandle_t mutex;      // Mutex for operations
+//     TaskHandle_t scheduler_task;  // Scheduler task handle
+//     TaskHandle_t packet_creator_task; // Packet creator task handle
+    
+//     // Class information
+//     data_type_t class_types[MAX_CLASSES]; // Data type for each class
+    
+//     // Statistics
+//     uint32_t packets_processed;   // Total packets processed
+//     uint32_t packets_transmitted; // Packets successfully transmitted
+//     uint32_t deadline_misses;     // Packets that missed deadlines
+//     uint32_t current_time_ms;     // Current time in milliseconds
+// } scheduler_context_t;
 typedef struct {
     packet_queue_t packet_queues[MAX_CLASSES]; // Separate queue for each class
     SemaphoreHandle_t mutex;      // Mutex for operations
@@ -102,7 +120,9 @@ typedef struct {
     TaskHandle_t packet_creator_task; // Packet creator task handle
     
     // Class information
-    data_type_t class_types[MAX_CLASSES]; // Data type for each class
+    data_type_t class_types[MAX_CLASSES];  // Data type for each class
+    uint32_t class_periods[MAX_CLASSES];   // Period for each class (ms)
+    uint32_t class_deadlines[MAX_CLASSES]; // Deadline for each class (ms)
     
     // Statistics
     uint32_t packets_processed;   // Total packets processed
@@ -110,6 +130,7 @@ typedef struct {
     uint32_t deadline_misses;     // Packets that missed deadlines
     uint32_t current_time_ms;     // Current time in milliseconds
 } scheduler_context_t;
+
 
 /* Global scheduler context */
 static scheduler_context_t scheduler_ctx;
@@ -265,7 +286,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
                 break;
                 
             case WIFI_EVENT_STA_CONNECTED:
-                ESP_LOGI(TAG, "Connected to AP successfully!");
+                ESP_LOGI(TAG, "!!!Connected to AP successfully!!!!");
                 break;
                 
             case WIFI_EVENT_STA_DISCONNECTED:
@@ -419,19 +440,9 @@ esp_err_t scheduler_submit_packet(class_id_t class_id, const void *data, uint16_
     packet.data_count = count;
     packet.size = total_size;
     
-    // Set deadline based on class
+    // Set deadline based on class - use configurable deadlines now
     uint32_t current_time = get_current_time_ms();
-    switch (class_id) {
-        case CLASS_1:
-            packet.deadline = current_time + 3000;  // 3 seconds
-            break;
-        case CLASS_2:
-            packet.deadline = current_time + 5000;  // 5 seconds
-            break;
-        case CLASS_3:
-            packet.deadline = current_time + 6000;  // 6 seconds
-            break;
-    }
+    packet.deadline = current_time + scheduler_ctx.class_deadlines[class_id];
     
     // Copy data
     if (data != NULL && total_size > 0) {
@@ -450,9 +461,6 @@ esp_err_t scheduler_submit_packet(class_id_t class_id, const void *data, uint16_
     } else {
         return ESP_FAIL;
     }
-    
-    // ESP_LOGI(TAG, "Queued Class %d packet: Type=%d, Count=%d, Size=%d, Deadline=%lu",
-    //          class_id + 1, data_type, count, total_size, packet.deadline);
     
     return ESP_OK;
 }
@@ -556,7 +564,7 @@ static void process_packets(void)
     uint16_t actual_data_size = MAX_TX_SIZE - remaining_space;
     
     // Count how many different classes were included
-    ESP_LOGI(TAG, "======Sending buffer #%lu...=========", tx_packet_counter);
+    ESP_LOGI(TAG, "==========Sending buffer #%lu...================", tx_packet_counter);
     ESP_LOGI(TAG, "  Total data size: %d bytes (%.1f%% of buffer capacity)",
             actual_data_size, (actual_data_size * 100.0) / MAX_TX_SIZE);
 
@@ -676,7 +684,7 @@ static esp_err_t send_data_packet(uint8_t *data, uint16_t size, uint8_t class_co
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send data packet: %s", esp_err_to_name(ret));
     } else {
-        ESP_LOGI(TAG, "Sent data packet: Class1=%ditem(type%d), Class2=%ditem(type%d), Class3=%ditem(type%d), Size=%d bytes",
+        ESP_LOGI(TAG, "  Sent data packet: Class1=%ditem(type%d), Class2=%ditem(type%d), Class3=%ditem(type%d), Size=%d bytes",
                 header.class_counts[0], header.class_types[0],
                 header.class_counts[1], header.class_types[1],
                 header.class_counts[2], header.class_types[2],
@@ -813,57 +821,52 @@ static void packet_creator_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Packet creator task started");
     
-    TickType_t last_wake_time = xTaskGetTickCount();
-    
     // Track the last time a packet was created for each class
-    TickType_t last_class1_time = xTaskGetTickCount();
-    TickType_t last_class2_time = xTaskGetTickCount();
-    TickType_t last_class3_time = xTaskGetTickCount();
-    
-    // Define periods in ticks
-    const TickType_t class1_period = pdMS_TO_TICKS(3000);  // 3 seconds
-    const TickType_t class2_period = pdMS_TO_TICKS(5000);  // 5 seconds
-    const TickType_t class3_period = pdMS_TO_TICKS(6000);  // 6 seconds
+    TickType_t last_class_time[MAX_CLASSES];
+    for (int i = 0; i < MAX_CLASSES; i++) {
+        last_class_time[i] = xTaskGetTickCount();
+    }
     
     // Define check interval (sleep time between checks)
     const TickType_t check_interval = pdMS_TO_TICKS(100);  // Check every 100ms
     
     // Data size counters to create varying sized packets
-    uint16_t class1_count = 5;
-    uint16_t class2_count = 4;
-    uint16_t class3_count = 6;
+    uint16_t class_counts[MAX_CLASSES] = {5, 4, 6};
     
     while (1) {
         TickType_t current_time = xTaskGetTickCount();
         
-        // Check if it's time to create a Class 1 packet (every 3 seconds)
-        if ((current_time - last_class1_time) >= class1_period) {
-            //ESP_LOGI(TAG, "Creating Class 1 packet (3s interval)");
-            create_test_int32_packet(CLASS_1, class1_count);
-            last_class1_time = current_time;
+        // Check if we need to create packets for any class based on their periods
+        for (int class_id = 0; class_id < MAX_CLASSES; class_id++) {
+            // Get current period for this class (with mutex protection)
+            uint32_t period_ms = DEFAULT_CLASS1_PERIOD;  // Default value
             
-            // Vary the packet size for the next time
-            class1_count = 5 + (class1_count % 5);
-        }
-        
-        // Check if it's time to create a Class 2 packet (every 5 seconds)
-        if ((current_time - last_class2_time) >= class2_period) {
-            //ESP_LOGI(TAG, "Creating Class 2 packet (5s interval)");
-            create_test_float_packet(CLASS_2, class2_count);
-            last_class2_time = current_time;
+            if (xSemaphoreTake(scheduler_ctx.mutex, portMAX_DELAY) == pdTRUE) {
+                period_ms = scheduler_ctx.class_periods[class_id];
+                xSemaphoreGive(scheduler_ctx.mutex);
+            }
             
-            // Vary the packet size for the next time
-            class2_count = 4 + (class2_count % 4);
-        }
-        
-        // Check if it's time to create a Class 3 packet (every 6 seconds)
-        if ((current_time - last_class3_time) >= class3_period) {
-            //ESP_LOGI(TAG, "Creating Class 3 packet (6s interval)");
-            create_test_int16_packet(CLASS_3, class3_count);
-            last_class3_time = current_time;
+            TickType_t period_ticks = pdMS_TO_TICKS(period_ms);
             
-            // Vary the packet size for the next time
-            class3_count = 6 + (class3_count % 3);
+            // Check if it's time to create a packet for this class
+            if ((current_time - last_class_time[class_id]) >= period_ticks) {
+                switch (class_id) {
+                    case CLASS_1:
+                        create_test_int32_packet(CLASS_1, class_counts[CLASS_1]);
+                        class_counts[CLASS_1] = 5 + (class_counts[CLASS_1] % 5);
+                        break;
+                    case CLASS_2:
+                        create_test_float_packet(CLASS_2, class_counts[CLASS_2]);
+                        class_counts[CLASS_2] = 4 + (class_counts[CLASS_2] % 4);
+                        break;
+                    case CLASS_3:
+                        create_test_int16_packet(CLASS_3, class_counts[CLASS_3]);
+                        class_counts[CLASS_3] = 6 + (class_counts[CLASS_3] % 3);
+                        break;
+                }
+                
+                last_class_time[class_id] = current_time;
+            }
         }
         
         // Print statistics every second
@@ -879,7 +882,7 @@ static void packet_creator_task(void *pvParameters)
 }
 
 /* Initialize the packet scheduler */
-void scheduler_init(void)
+void scheduler_init(scheduler_config_t *config)
 {
     // Initialize packet queues for each class
     for (int i = 0; i < MAX_CLASSES; i++) {
@@ -893,10 +896,12 @@ void scheduler_init(void)
         return;
     }
 
-    // Set default data types
-    scheduler_ctx.class_types[CLASS_1] = DATA_TYPE_INT32;  // Class 1 (3s) - INT32
-    scheduler_ctx.class_types[CLASS_2] = DATA_TYPE_FLOAT;  // Class 2 (5s) - FLOAT
-    scheduler_ctx.class_types[CLASS_3] = DATA_TYPE_INT16;  // Class 3 (6s) - INT16
+    // Set class types, periods, and deadlines from the configuration
+    for (int i = 0; i < MAX_CLASSES; i++) {
+        scheduler_ctx.class_types[i] = config->class_types[i];
+        scheduler_ctx.class_periods[i] = config->class_periods[i];
+        scheduler_ctx.class_deadlines[i] = config->class_deadlines[i];
+    }
 
     // Initialize statistics
     scheduler_ctx.packets_processed = 0;
@@ -934,7 +939,22 @@ void scheduler_init(void)
         return;
     }
     
-    ESP_LOGI(TAG, "Packet scheduler initialized with %d classes and separate creation/scheduling tasks", MAX_CLASSES);
+    // Log initialization details
+    ESP_LOGI(TAG, "Packet scheduler initialized with the following configuration:");
+    for (int i = 0; i < MAX_CLASSES; i++) {
+        const char *type_str;
+        switch (scheduler_ctx.class_types[i]) {
+            case DATA_TYPE_INT8:   type_str = "INT8";   break;
+            case DATA_TYPE_INT16:  type_str = "INT16";  break;
+            case DATA_TYPE_INT32:  type_str = "INT32";  break;
+            case DATA_TYPE_FLOAT:  type_str = "FLOAT";  break;
+            case DATA_TYPE_DOUBLE: type_str = "DOUBLE"; break;
+            default:               type_str = "UNKNOWN"; break;
+        }
+        
+        ESP_LOGI(TAG, "Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms", 
+                i + 1, type_str, scheduler_ctx.class_periods[i], scheduler_ctx.class_deadlines[i]);
+    }
 }
 
 /* Modified main application entry point */
@@ -955,15 +975,23 @@ void app_main(void)
     // Short delay to allow WiFi to initialize fully
     vTaskDelay(pdMS_TO_TICKS(2000));
     
-    // Initialize packet scheduler (now creates both tasks)
-    ESP_LOGI(TAG, "Initializing packet scheduler");
-    scheduler_init();
+    // Initialize configuration structure
+    scheduler_config_t config = {0};
     
-    // Set initial class types to match expected formats
-    scheduler_set_class_type(CLASS_1, DATA_TYPE_INT32);  // Class 1: INT32 (3s deadline)
-    scheduler_set_class_type(CLASS_2, DATA_TYPE_FLOAT);  // Class 2: FLOAT (5s deadline)
-    scheduler_set_class_type(CLASS_3, DATA_TYPE_INT16);  // Class 3: INT16 (6s deadline)
+    // Initialize the terminal and get configuration from user
+    ESP_LOGI(TAG, "Waiting for user configuration via terminal...");
+    terminal_init_and_configure(&config);
+    
+    // Once user has completed configuration via terminal, initialize packet scheduler
+    ESP_LOGI(TAG, "User configuration complete, initializing scheduler...");
+    scheduler_init(&config);
+    
+    // Notify user that the system is now running
+    printf("\n==================================================\n");
+    printf("    ESP32 WiFi Packet Scheduler Now Running    \n");
+    printf("==================================================\n");
+    printf("System is running with configured parameters.\n");
     
     // Main thread has nothing more to do - all work is done in the tasks
-    ESP_LOGI(TAG, "Main task complete, system running with separate scheduler and creator tasks");
+    ESP_LOGI(TAG, "Main task complete, system running with configured parameters");
 }
