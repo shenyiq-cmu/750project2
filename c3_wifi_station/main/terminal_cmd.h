@@ -19,7 +19,6 @@
 #include "esp_console.h"
 #include "esp_vfs_dev.h"
 #include "linenoise/linenoise.h"
-
 #include "esp_random.h"  // For esp_random() function
 
 /* Terminal Configuration */
@@ -42,6 +41,13 @@
 #define MAX_DEADLINE_FACTOR 1.2       // Deadline can be 120% of period at maximum
 #define MIN_THRESHOLD       100       // Minimum processing threshold: 100ms
 #define MAX_THRESHOLD       5000      // Maximum processing threshold: 5000ms (5s)
+
+/* Data type options for command line */
+#define TYPE_OPTION_INT8  "int8"
+#define TYPE_OPTION_INT16 "int16"
+#define TYPE_OPTION_INT32 "int32"
+#define TYPE_OPTION_FLOAT "float"
+#define TYPE_OPTION_DOUBLE "double"
 
 /* Forward declarations for scheduler types */
 typedef enum {

@@ -1,5 +1,5 @@
 /**
- * @file terminal_commands.c
+ * @file terminal_cmd.c
  * @brief Implementation of terminal commands for ESP32 scheduler
  */
 
@@ -24,6 +24,7 @@ static int cmd_reset(int argc, char **argv, scheduler_config_t *config);
 static int cmd_random(int argc, char **argv, scheduler_config_t *config);
 static int cmd_start(int argc, char **argv, scheduler_config_t *config);
 static int cmd_threshold(int argc, char **argv, scheduler_config_t *config);
+static int cmd_type(int argc, char **argv, scheduler_config_t *config);
 
 /* Helper function for generating random values */
 static uint32_t random_range(uint32_t min, uint32_t max) 
@@ -38,6 +39,7 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  %-10s - Display this help message\n", "help");
     printf("  %-10s - Show current class periods and deadlines\n", "status");
     printf("  %-10s - Set period and deadline for a class\n", "set");
+    printf("  %-10s - Set data type for a class\n", "type");
     printf("  %-10s - Set processing threshold\n", "threshold");
     printf("  %-10s - Reset all classes to default values\n", "reset");
     printf("  %-10s - Set random periods and deadlines for all classes\n", "random");
@@ -49,6 +51,11 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  Example: set 1 4000 3500        - Set Class 1 period to 4s, deadline to 3.5s\n");
     printf("  Example: set 2 5000 -a          - Set Class 2 period to 5s, auto deadline\n");
     printf("  Example: set 3 -a -a            - Set Class 3 with auto period and deadline\n");
+    
+    printf("\nType command:\n");
+    printf("  type <class> <datatype>         - Set data type for a class\n");
+    printf("  Available types: int8, int16, int32, float, double\n");
+    printf("  Example: type 1 int32           - Set Class 1 type to INT32\n");
     
     printf("\nThreshold command:\n");
     printf("  threshold <value_ms>            - Set deadline processing threshold\n");
@@ -165,6 +172,68 @@ static int cmd_set_class(int argc, char **argv, scheduler_config_t *config)
     return 0;
 }
 
+/* Set class data type command */
+static int cmd_type(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting class data type");
+    
+    if (argc < 3) {
+        printf("Usage: type <class> <datatype>\n");
+        printf("Available datatypes: int8, int16, int32, float, double\n");
+        printf("Example: type 1 int32\n");
+        printf("Example: type 2 float\n");
+        printf("Example: type 3 int16\n");
+        return 1;
+    }
+    
+    // Parse class number
+    int class_num = atoi(argv[1]);
+    if (class_num < 1 || class_num > MAX_CLASSES) {
+        printf("Error: Invalid class number. Must be between 1 and %d.\n", MAX_CLASSES);
+        return 1;
+    }
+    
+    class_id_t class_id = (class_id_t)(class_num - 1);  // Convert to 0-based index
+    
+    // Parse data type
+    data_type_t new_type;
+    const char *type_name = argv[2];
+    
+    if (strcasecmp(type_name, TYPE_OPTION_INT8) == 0) {
+        new_type = DATA_TYPE_INT8;
+    } else if (strcasecmp(type_name, TYPE_OPTION_INT16) == 0) {
+        new_type = DATA_TYPE_INT16;
+    } else if (strcasecmp(type_name, TYPE_OPTION_INT32) == 0) {
+        new_type = DATA_TYPE_INT32;
+    } else if (strcasecmp(type_name, TYPE_OPTION_FLOAT) == 0) {
+        new_type = DATA_TYPE_FLOAT;
+    } else if (strcasecmp(type_name, TYPE_OPTION_DOUBLE) == 0) {
+        new_type = DATA_TYPE_DOUBLE;
+    } else {
+        printf("Error: Invalid data type '%s'.\n", type_name);
+        printf("Available datatypes: int8, int16, int32, float, double\n");
+        return 1;
+    }
+    
+    // Update the data type
+    config->class_types[class_id] = new_type;
+    
+    // Show confirmation
+    const char *type_str;
+    switch (new_type) {
+        case DATA_TYPE_INT8:   type_str = "INT8";   break;
+        case DATA_TYPE_INT16:  type_str = "INT16";  break;
+        case DATA_TYPE_INT32:  type_str = "INT32";  break;
+        case DATA_TYPE_FLOAT:  type_str = "FLOAT";  break;
+        case DATA_TYPE_DOUBLE: type_str = "DOUBLE"; break;
+        default:               type_str = "UNKNOWN"; break;
+    }
+    
+    printf("Updated Class %d: Type=%s\n", class_num, type_str);
+    
+    return 0;
+}
+
 /* Reset all classes to default values */
 static int cmd_reset(int argc, char **argv, scheduler_config_t *config) 
 {
@@ -201,6 +270,23 @@ static int cmd_random(int argc, char **argv, scheduler_config_t *config)
     
     printf("Setting random values for all classes:\n");
     
+    // These arrays define the possible data types and their names
+    data_type_t possible_types[] = {
+        DATA_TYPE_INT8, 
+        DATA_TYPE_INT16, 
+        DATA_TYPE_INT32,
+        DATA_TYPE_FLOAT, 
+        DATA_TYPE_DOUBLE
+    };
+    const char* type_names[] = {
+        "INT8", 
+        "INT16", 
+        "INT32", 
+        "FLOAT", 
+        "DOUBLE"
+    };
+    const int num_types = sizeof(possible_types) / sizeof(possible_types[0]);
+    
     for (int i = 0; i < MAX_CLASSES; i++) {
         // Generate random period
         uint32_t period = random_range(MIN_PERIOD, MAX_PERIOD);
@@ -212,12 +298,17 @@ static int cmd_random(int argc, char **argv, scheduler_config_t *config)
         
         uint32_t deadline = (uint32_t)(period * factor);
         
+        // Generate random data type
+        int rand_type_index = esp_random() % num_types;
+        data_type_t data_type = possible_types[rand_type_index];
+        
         // Update values
         config->class_periods[i] = period;
         config->class_deadlines[i] = deadline;
+        config->class_types[i] = data_type;
         
-        printf("Class %d: Period=%lu ms, Deadline=%lu ms (%.1f%% of period)\n", 
-               i + 1, period, deadline, factor * 100);
+        printf("Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms (%.1f%% of period)\n", 
+               i + 1, type_names[rand_type_index], period, deadline, factor * 100);
     }
     
     // Also generate a random threshold
@@ -279,6 +370,7 @@ static const cmd_t commands[] = {
     {"help", "Print the list of commands", cmd_help},
     {"status", "Show current class periods and deadlines", cmd_status},
     {"set", "Set period and deadline for a class", cmd_set_class},
+    {"type", "Set data type for a class", cmd_type},
     {"threshold", "Set processing threshold", cmd_threshold},
     {"reset", "Reset all classes to default values", cmd_reset},
     {"random", "Set random periods and deadlines for all classes", cmd_random},
