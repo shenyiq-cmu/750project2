@@ -50,22 +50,6 @@ static const char *TAG = "wifi-sta-sender";
 
 static int s_retry_num = 0;
 
-/* Class definitions */
-// typedef enum {
-//     CLASS_1 = 0,                 // Class 1: 3-second period
-//     CLASS_2 = 1,                 // Class 2: 5-second period
-//     CLASS_3 = 2,                 // Class 3: 6-second period
-// } class_id_t;
-
-// /* Data type definitions */
-// typedef enum {
-//     DATA_TYPE_INT8 = 0,          // 8-bit integer
-//     DATA_TYPE_INT16 = 1,         // 16-bit integer
-//     DATA_TYPE_INT32 = 2,         // 32-bit integer
-//     DATA_TYPE_FLOAT = 3,         // 32-bit float
-//     DATA_TYPE_DOUBLE = 4,        // 64-bit double
-// } data_type_t;
-
 /* Internal queue packet structure */
 typedef struct {
     class_id_t class_id;          // Class identifier (0, 1, 2)
@@ -98,21 +82,6 @@ typedef struct {
 } __attribute__((packed)) data_packet_header_t;
 
 /* Scheduler context */
-// typedef struct {
-//     packet_queue_t packet_queues[MAX_CLASSES]; // Separate queue for each class
-//     SemaphoreHandle_t mutex;      // Mutex for operations
-//     TaskHandle_t scheduler_task;  // Scheduler task handle
-//     TaskHandle_t packet_creator_task; // Packet creator task handle
-    
-//     // Class information
-//     data_type_t class_types[MAX_CLASSES]; // Data type for each class
-    
-//     // Statistics
-//     uint32_t packets_processed;   // Total packets processed
-//     uint32_t packets_transmitted; // Packets successfully transmitted
-//     uint32_t deadline_misses;     // Packets that missed deadlines
-//     uint32_t current_time_ms;     // Current time in milliseconds
-// } scheduler_context_t;
 typedef struct {
     packet_queue_t packet_queues[MAX_CLASSES]; // Separate queue for each class
     SemaphoreHandle_t mutex;      // Mutex for operations
@@ -123,6 +92,7 @@ typedef struct {
     data_type_t class_types[MAX_CLASSES];  // Data type for each class
     uint32_t class_periods[MAX_CLASSES];   // Period for each class (ms)
     uint32_t class_deadlines[MAX_CLASSES]; // Deadline for each class (ms)
+    uint32_t processing_threshold;         // Deadline processing threshold (ms)
     
     // Statistics
     uint32_t packets_processed;   // Total packets processed
@@ -480,7 +450,8 @@ static void process_packets(void)
     }
     
     // Check if we need to process now based on deadline threshold
-    if (earliest_deadline > current_time + DEADLINE_PROCESSING_THRESHOLD_MS) {
+    // Use the configurable threshold from scheduler context instead of the fixed macro
+    if (earliest_deadline > current_time + scheduler_ctx.processing_threshold) {
         ESP_LOGD(TAG, "Earliest deadline not approaching yet: %lu, current time: %lu", 
                  earliest_deadline, current_time);
         return; // No urgency to process
@@ -881,6 +852,8 @@ static void packet_creator_task(void *pvParameters)
     }
 }
 
+
+/* Initialize the packet scheduler */
 /* Initialize the packet scheduler */
 void scheduler_init(scheduler_config_t *config)
 {
@@ -902,6 +875,9 @@ void scheduler_init(scheduler_config_t *config)
         scheduler_ctx.class_periods[i] = config->class_periods[i];
         scheduler_ctx.class_deadlines[i] = config->class_deadlines[i];
     }
+    
+    // Set processing threshold from configuration - ONLY ONCE
+    scheduler_ctx.processing_threshold = config->processing_threshold;
 
     // Initialize statistics
     scheduler_ctx.packets_processed = 0;
@@ -955,6 +931,9 @@ void scheduler_init(scheduler_config_t *config)
         ESP_LOGI(TAG, "Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms", 
                 i + 1, type_str, scheduler_ctx.class_periods[i], scheduler_ctx.class_deadlines[i]);
     }
+    
+    // Also log the processing threshold
+    ESP_LOGI(TAG, "Processing threshold: %lu ms", scheduler_ctx.processing_threshold);
 }
 
 /* Modified main application entry point */

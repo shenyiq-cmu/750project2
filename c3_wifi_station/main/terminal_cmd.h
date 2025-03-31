@@ -1,5 +1,5 @@
 /**
- * @file terminal_commands.h
+ * @file terminal_cmd.h
  * @brief Terminal command definitions and interface for ESP32 scheduler
  */
 
@@ -34,11 +34,14 @@
 #define DEFAULT_CLASS1_PERIOD 3000    // Default: 3 seconds
 #define DEFAULT_CLASS2_PERIOD 5000    // Default: 5 seconds
 #define DEFAULT_CLASS3_PERIOD 6000    // Default: 6 seconds
+#define DEFAULT_PROCESSING_THRESHOLD 1000  // Default: 1 second (1000ms)
 
-#define MIN_PERIOD          100      // Minimum period: 100ms
+#define MIN_PERIOD          1000      // Minimum period: 1 second
 #define MAX_PERIOD          10000     // Maximum period: 10 seconds
 #define MIN_DEADLINE_FACTOR 0.8       // Deadline can be 80% of period at minimum
 #define MAX_DEADLINE_FACTOR 1.2       // Deadline can be 120% of period at maximum
+#define MIN_THRESHOLD       100       // Minimum processing threshold: 100ms
+#define MAX_THRESHOLD       5000      // Maximum processing threshold: 5000ms (5s)
 
 /* Forward declarations for scheduler types */
 typedef enum {
@@ -60,6 +63,7 @@ typedef struct {
     uint32_t class_periods[MAX_CLASSES];   // Period for each class (ms)
     uint32_t class_deadlines[MAX_CLASSES]; // Deadline for each class (ms)
     data_type_t class_types[MAX_CLASSES];  // Data type for each class
+    uint32_t processing_threshold;         // Deadline processing threshold (ms)
     bool start_program;                     // Flag to indicate if program should start
 } scheduler_config_t;
 

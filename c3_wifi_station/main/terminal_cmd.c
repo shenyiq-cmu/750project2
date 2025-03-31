@@ -5,9 +5,9 @@
 
 #include "terminal_cmd.h"
 #include "esp_log.h"
-#include "esp_random.h" // Add proper header for esp_random
+#include "esp_random.h"
 
-static const char *TAG = "terminal"; // This will be used for ESP_LOG* calls
+static const char *TAG = "terminal";
 
 /* Command structure */
 typedef struct {
@@ -23,6 +23,7 @@ static int cmd_set_class(int argc, char **argv, scheduler_config_t *config);
 static int cmd_reset(int argc, char **argv, scheduler_config_t *config);
 static int cmd_random(int argc, char **argv, scheduler_config_t *config);
 static int cmd_start(int argc, char **argv, scheduler_config_t *config);
+static int cmd_threshold(int argc, char **argv, scheduler_config_t *config);
 
 /* Helper function for generating random values */
 static uint32_t random_range(uint32_t min, uint32_t max) 
@@ -37,6 +38,7 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  %-10s - Display this help message\n", "help");
     printf("  %-10s - Show current class periods and deadlines\n", "status");
     printf("  %-10s - Set period and deadline for a class\n", "set");
+    printf("  %-10s - Set processing threshold\n", "threshold");
     printf("  %-10s - Reset all classes to default values\n", "reset");
     printf("  %-10s - Set random periods and deadlines for all classes\n", "random");
     printf("  %-10s - Start the program with current configuration\n", "start");
@@ -47,6 +49,11 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  Example: set 1 4000 3500        - Set Class 1 period to 4s, deadline to 3.5s\n");
     printf("  Example: set 2 5000 -a          - Set Class 2 period to 5s, auto deadline\n");
     printf("  Example: set 3 -a -a            - Set Class 3 with auto period and deadline\n");
+    
+    printf("\nThreshold command:\n");
+    printf("  threshold <value_ms>            - Set deadline processing threshold\n");
+    printf("  Example: threshold 2000         - Set threshold to 2000ms (2s)\n");
+    printf("  Example: threshold -a           - Set auto-generated threshold\n");
     
     printf("\nOnce you've configured all parameters, use 'start' to begin execution.\n");
     return 0;
@@ -71,6 +78,10 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
         printf("Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms\n", 
                i + 1, type_str, config->class_periods[i], config->class_deadlines[i]);
     }
+    
+    // Add threshold information
+    printf("\nProcessing Threshold: %lu ms\n", config->processing_threshold);
+    printf("(Tasks are processed when deadline is within this threshold)\n");
     
     return 0;
 }
@@ -158,6 +169,7 @@ static int cmd_set_class(int argc, char **argv, scheduler_config_t *config)
 static int cmd_reset(int argc, char **argv, scheduler_config_t *config) 
 {
     ESP_LOGI(TAG, "Resetting all classes to default values");
+    
     // Reset to default values
     config->class_periods[CLASS_1] = DEFAULT_CLASS1_PERIOD;
     config->class_periods[CLASS_2] = DEFAULT_CLASS2_PERIOD;
@@ -173,7 +185,11 @@ static int cmd_reset(int argc, char **argv, scheduler_config_t *config)
     config->class_types[CLASS_2] = DATA_TYPE_FLOAT;  // Class 2 - FLOAT
     config->class_types[CLASS_3] = DATA_TYPE_INT16;  // Class 3 - INT16
     
+    // Reset processing threshold
+    config->processing_threshold = DEFAULT_PROCESSING_THRESHOLD;
+    
     printf("All classes reset to default values.\n");
+    printf("Processing threshold reset to %lu ms.\n", config->processing_threshold);
     
     return 0;
 }
@@ -182,6 +198,7 @@ static int cmd_reset(int argc, char **argv, scheduler_config_t *config)
 static int cmd_random(int argc, char **argv, scheduler_config_t *config) 
 {
     ESP_LOGI(TAG, "Setting random values for all classes");
+    
     printf("Setting random values for all classes:\n");
     
     for (int i = 0; i < MAX_CLASSES; i++) {
@@ -203,6 +220,44 @@ static int cmd_random(int argc, char **argv, scheduler_config_t *config)
                i + 1, period, deadline, factor * 100);
     }
     
+    // Also generate a random threshold
+    uint32_t threshold = random_range(MIN_THRESHOLD, MAX_THRESHOLD);
+    config->processing_threshold = threshold;
+    printf("Processing threshold: %lu ms\n", threshold);
+    
+    return 0;
+}
+
+/* Set threshold command implementation */
+static int cmd_threshold(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting processing threshold");
+    
+    if (argc < 2) {
+        printf("Usage: threshold <value_ms>\n");
+        printf("       Use '-a' for auto value\n");
+        printf("Current threshold: %lu ms\n", config->processing_threshold);
+        return 1;
+    }
+    
+    uint32_t threshold = config->processing_threshold;
+    
+    if (strcmp(argv[1], "-a") == 0) {
+        // Auto-generate threshold
+        threshold = random_range(MIN_THRESHOLD, MAX_THRESHOLD);
+        printf("Auto-generated threshold: %lu ms\n", threshold);
+    } else {
+        threshold = atoi(argv[1]);
+        if (threshold < MIN_THRESHOLD || threshold > MAX_THRESHOLD) {
+            printf("Warning: Threshold outside recommended range [%d-%d]. Clamping.\n", 
+                   MIN_THRESHOLD, MAX_THRESHOLD);
+            threshold = (threshold < MIN_THRESHOLD) ? MIN_THRESHOLD : MAX_THRESHOLD;
+        }
+    }
+    
+    config->processing_threshold = threshold;
+    printf("Processing threshold set to %lu ms.\n", threshold);
+    
     return 0;
 }
 
@@ -210,6 +265,7 @@ static int cmd_random(int argc, char **argv, scheduler_config_t *config)
 static int cmd_start(int argc, char **argv, scheduler_config_t *config) 
 {
     ESP_LOGI(TAG, "Starting program with current configuration");
+    
     printf("\nStarting program with following configuration:\n");
     cmd_status(0, NULL, config);
     
@@ -223,6 +279,7 @@ static const cmd_t commands[] = {
     {"help", "Print the list of commands", cmd_help},
     {"status", "Show current class periods and deadlines", cmd_status},
     {"set", "Set period and deadline for a class", cmd_set_class},
+    {"threshold", "Set processing threshold", cmd_threshold},
     {"reset", "Reset all classes to default values", cmd_reset},
     {"random", "Set random periods and deadlines for all classes", cmd_random},
     {"start", "Start program with current configuration", cmd_start},
@@ -322,6 +379,9 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config)
     config->class_types[CLASS_1] = DATA_TYPE_INT32;  // Class 1 - INT32
     config->class_types[CLASS_2] = DATA_TYPE_FLOAT;  // Class 2 - FLOAT
     config->class_types[CLASS_3] = DATA_TYPE_INT16;  // Class 3 - INT16
+    
+    // Set default processing threshold
+    config->processing_threshold = DEFAULT_PROCESSING_THRESHOLD;
     
     // Display current configuration
     cmd_status(0, NULL, config);
