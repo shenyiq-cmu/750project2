@@ -354,6 +354,7 @@ static void wifi_promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 /* Process a data packet */
 static void process_data_packet(const uint8_t *data, size_t length)
 {
+    rx_packet_counter++;
     // Make sure the packet is at least as large as our header
     if (length < sizeof(data_packet_header_t)) {
         ESP_LOGE(TAG, "Data packet too small: %d bytes (minimum size: %d)", 
@@ -413,10 +414,6 @@ static void process_data_packet(const uint8_t *data, size_t length)
     ESP_LOGI(TAG, "=============================================================");
     ESP_LOGI(TAG, "Received packet #%lu", rx_packet_counter);
     ESP_LOGI(TAG, "  Total data size: %d bytes", header->total_size);
-    ESP_LOGI(TAG, "  Sent data packet: Class1=%ditem(type%d), Class2=%ditem(type%d), Class3=%ditem(type%d)",
-                header->class_counts[0], header->class_types[0],
-                header->class_counts[1], header->class_types[1],
-                header->class_counts[2], header->class_types[2]);
     // ESP_LOGI(TAG, "  Transmission timestamp: %lu", header->timestamp);
     // ESP_LOGI(TAG, "  Reception timestamp: %lu", current_time);
     // ESP_LOGI(TAG, "  Latency: %lu ms", latency);
@@ -500,9 +497,11 @@ static void process_data_packet(const uint8_t *data, size_t length)
                  class_id + 1, header->class_counts[class_id], header->class_types[class_id]);
         
         
+        
         // Move to next class's data
         class_data += class_size;
     }
+     ESP_LOGI(TAG, "=============================================================");
 }
 
 /* Main receiver task */
