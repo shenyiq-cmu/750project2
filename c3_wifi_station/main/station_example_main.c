@@ -19,8 +19,8 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 
-/* Include the terminal commands header */
 #include "terminal_cmd.h"
+#include "packet_generator.h"
 
 /* WiFi configuration */
 #define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
@@ -689,81 +689,6 @@ static void scheduler_task(void *pvParameters)
     }
 }
 
-/* Create a test int32 packet */
-void create_test_int32_packet(class_id_t class_id, uint16_t count)
-{
-    // Create array of int32 values
-    int32_t *values = malloc(count * sizeof(int32_t));
-    if (values == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for test data");
-        return;
-    }
-    
-    // Fill with sequential values
-    for (int i = 0; i < count; i++) {
-        values[i] = i;
-    }
-    
-    // Make sure data type matches what we're sending
-    //scheduler_set_class_type(class_id, DATA_TYPE_INT32);
-    
-    // Submit packet with this data
-    scheduler_submit_packet(class_id, values, count);
-    
-    // Free the temporary buffer
-    free(values);
-}
-
-/* Create a test float packet */
-void create_test_float_packet(class_id_t class_id, uint16_t count)
-{
-    // Create array of float values
-    float *values = malloc(count * sizeof(float));
-    if (values == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for test data");
-        return;
-    }
-    
-    // Fill with values
-    for (int i = 0; i < count; i++) {
-        values[i] = i * 0.1f;
-    }
-    
-    // Make sure data type matches what we're sending
-    //scheduler_set_class_type(class_id, DATA_TYPE_FLOAT);
-    
-    // Submit packet with this data
-    scheduler_submit_packet(class_id, values, count);
-    
-    // Free the temporary buffer
-    free(values);
-}
-
-/* Create a test int16 packet */
-void create_test_int16_packet(class_id_t class_id, uint16_t count)
-{
-    // Create array of int16 values
-    int16_t *values = malloc(count * sizeof(int16_t));
-    if (values == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate memory for test data");
-        return;
-    }
-    
-    // Fill with sequential values
-    for (int i = 0; i < count; i++) {
-        values[i] = i * 10;
-    }
-    
-    // Make sure data type matches what we're sending
-    //scheduler_set_class_type(class_id, DATA_TYPE_INT16);
-    
-    // Submit packet with this data
-    scheduler_submit_packet(class_id, values, count);
-    
-    // Free the temporary buffer
-    free(values);
-}
-
 /* Print scheduler statistics */
 void print_scheduler_stats(void)
 {
@@ -792,6 +717,17 @@ static void packet_creator_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Packet creator task started");
     
+    // Get the packet counts from parameters
+    uint16_t *class_counts = (uint16_t*)pvParameters;
+    if (class_counts == NULL) {
+        // If no parameters passed, use default values
+        static uint16_t default_counts[MAX_CLASSES] = {
+            DEFAULT_CLASS1_COUNT, DEFAULT_CLASS2_COUNT, DEFAULT_CLASS3_COUNT
+        };
+        class_counts = default_counts;
+        ESP_LOGW(TAG, "No packet counts provided, using defaults");
+    }
+    
     // Track the last time a packet was created for each class
     TickType_t last_class_time[MAX_CLASSES];
     for (int i = 0; i < MAX_CLASSES; i++) {
@@ -801,9 +737,6 @@ static void packet_creator_task(void *pvParameters)
     // Define check interval (sleep time between checks)
     const TickType_t check_interval = pdMS_TO_TICKS(100);  // Check every 100ms
     
-    // Data size counters to create varying sized packets
-    uint16_t class_counts[MAX_CLASSES] = {5, 4, 6};
-    
     while (1) {
         TickType_t current_time = xTaskGetTickCount();
         
@@ -811,9 +744,11 @@ static void packet_creator_task(void *pvParameters)
         for (int class_id = 0; class_id < MAX_CLASSES; class_id++) {
             // Get current period for this class (with mutex protection)
             uint32_t period_ms = DEFAULT_CLASS1_PERIOD;  // Default value
+            data_type_t data_type = DATA_TYPE_INT32;     // Default type
             
             if (xSemaphoreTake(scheduler_ctx.mutex, portMAX_DELAY) == pdTRUE) {
                 period_ms = scheduler_ctx.class_periods[class_id];
+                data_type = scheduler_ctx.class_types[class_id];
                 xSemaphoreGive(scheduler_ctx.mutex);
             }
             
@@ -821,20 +756,8 @@ static void packet_creator_task(void *pvParameters)
             
             // Check if it's time to create a packet for this class
             if ((current_time - last_class_time[class_id]) >= period_ticks) {
-                switch (class_id) {
-                    case CLASS_1:
-                        create_test_int32_packet(CLASS_1, class_counts[CLASS_1]);
-                        class_counts[CLASS_1] = 5 + (class_counts[CLASS_1] % 5);
-                        break;
-                    case CLASS_2:
-                        create_test_float_packet(CLASS_2, class_counts[CLASS_2]);
-                        class_counts[CLASS_2] = 4 + (class_counts[CLASS_2] % 4);
-                        break;
-                    case CLASS_3:
-                        create_test_int16_packet(CLASS_3, class_counts[CLASS_3]);
-                        class_counts[CLASS_3] = 6 + (class_counts[CLASS_3] % 3);
-                        break;
-                }
+                // Create a test packet with the configured data type
+                create_test_packet(class_id, class_counts[class_id], data_type);
                 
                 last_class_time[class_id] = current_time;
             }
@@ -850,10 +773,12 @@ static void packet_creator_task(void *pvParameters)
         // Sleep for a short interval before checking again
         vTaskDelay(check_interval);
     }
+    
+    // Free the allocated memory if we ever exit
+    free(pvParameters);
 }
 
 
-/* Initialize the packet scheduler */
 /* Initialize the packet scheduler */
 void scheduler_init(scheduler_config_t *config)
 {
@@ -885,18 +810,32 @@ void scheduler_init(scheduler_config_t *config)
     scheduler_ctx.deadline_misses = 0;
     scheduler_ctx.current_time_ms = 0;
     
-    // Create packet creator task
+    // Create packet creator task with packet counts passed as parameters
+    // We'll need to allocate memory for the counts that will persist for the task
+    uint16_t *task_params = malloc(MAX_CLASSES * sizeof(uint16_t));
+    if (task_params == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for task parameters");
+        return;
+    }
+    
+    // Copy the packet counts
+    for (int i = 0; i < MAX_CLASSES; i++) {
+        task_params[i] = config->packet_counts[i];
+    }
+    
+    // Create packet creator task with the parameters
     BaseType_t ret = xTaskCreate(
         packet_creator_task,             // Function that implements the task
         "packet_creator_task",           // Text name for the task
         16384,                           // Stack size in words
-        NULL,                            // Parameter passed into the task
+        (void*)task_params,              // Parameter passed into the task
         4,                               // Priority (lower than scheduler) 
         &scheduler_ctx.packet_creator_task // Used to pass out the task handle
     );
     
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create packet creator task");
+        free(task_params);  // Free allocated memory on failure
         return;
     }
     
@@ -928,13 +867,15 @@ void scheduler_init(scheduler_config_t *config)
             default:               type_str = "UNKNOWN"; break;
         }
         
-        ESP_LOGI(TAG, "Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms", 
-                i + 1, type_str, scheduler_ctx.class_periods[i], scheduler_ctx.class_deadlines[i]);
+        ESP_LOGI(TAG, "Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms, Count=%u", 
+                i + 1, type_str, scheduler_ctx.class_periods[i], scheduler_ctx.class_deadlines[i],
+                task_params[i]);
     }
     
     // Also log the processing threshold
     ESP_LOGI(TAG, "Processing threshold: %lu ms", scheduler_ctx.processing_threshold);
 }
+
 
 /* Modified main application entry point */
 void app_main(void)
