@@ -25,6 +25,7 @@ static int cmd_random(int argc, char **argv, scheduler_config_t *config);
 static int cmd_start(int argc, char **argv, scheduler_config_t *config);
 static int cmd_threshold(int argc, char **argv, scheduler_config_t *config);
 static int cmd_type(int argc, char **argv, scheduler_config_t *config);
+static int cmd_packet_count(int argc, char **argv, scheduler_config_t *config);
 
 /* Helper function for generating random values */
 static uint32_t random_range(uint32_t min, uint32_t max) 
@@ -40,6 +41,7 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  %-10s - Show current class periods and deadlines\n", "status");
     printf("  %-10s - Set period and deadline for a class\n", "set");
     printf("  %-10s - Set data type for a class\n", "type");
+    printf("  %-10s - Set packet count for a class\n", "count");
     printf("  %-10s - Set processing threshold\n", "threshold");
     printf("  %-10s - Reset all classes to default values\n", "reset");
     printf("  %-10s - Set random periods and deadlines for all classes\n", "random");
@@ -56,6 +58,11 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  type <class> <datatype>         - Set data type for a class\n");
     printf("  Available types: int8, int16, int32, float, double\n");
     printf("  Example: type 1 int32           - Set Class 1 type to INT32\n");
+    
+    printf("\nCount command:\n");
+    printf("  count <class> <value>           - Set packet count for a class\n");
+    printf("  Example: count 1 10             - Set Class 1 packet count to 10\n");
+    printf("  Example: count 2 -a             - Set Class 2 packet count to random value\n");
     
     printf("\nThreshold command:\n");
     printf("  threshold <value_ms>            - Set deadline processing threshold\n");
@@ -82,8 +89,9 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
             default:               type_str = "UNKNOWN"; break;
         }
         
-        printf("Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms\n", 
-               i + 1, type_str, config->class_periods[i], config->class_deadlines[i]);
+        printf("Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms, Count=%u\n", 
+               i + 1, type_str, config->class_periods[i], config->class_deadlines[i],
+               config->packet_counts[i]);
     }
     
     // Add threshold information
@@ -172,6 +180,55 @@ static int cmd_set_class(int argc, char **argv, scheduler_config_t *config)
     return 0;
 }
 
+/* Set packet count for a class */
+static int cmd_packet_count(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting packet count");
+    
+    if (argc < 3) {
+        printf("Usage: count <class> <value>\n");
+        printf("       Use '-a' for auto value\n");
+        printf("Example: count 1 10     - Set Class 1 packet count to 10\n");
+        printf("Example: count 2 -a     - Set Class 2 packet count to random value\n");
+        return 1;
+    }
+    
+    // Parse class number
+    int class_num = atoi(argv[1]);
+    if (class_num < 1 || class_num > MAX_CLASSES) {
+        printf("Error: Invalid class number. Must be between 1 and %d.\n", MAX_CLASSES);
+        return 1;
+    }
+    
+    class_id_t class_id = (class_id_t)(class_num - 1);  // Convert to 0-based index
+    
+    // Get current count
+    uint16_t count = config->packet_counts[class_id];
+    
+    // Parse new count
+    if (strcmp(argv[2], "-a") == 0) {
+        // Auto-generate count
+        count = random_range(MIN_PACKET_COUNT, MAX_PACKET_COUNT);
+        printf("Auto-generated packet count: %u\n", count);
+    } else {
+        // Parse user-provided value
+        uint16_t new_count = atoi(argv[2]);
+        if (new_count < MIN_PACKET_COUNT || new_count > MAX_PACKET_COUNT) {
+            printf("Warning: Count outside recommended range [%d-%d]. Clamping.\n", 
+                   MIN_PACKET_COUNT, MAX_PACKET_COUNT);
+            count = (new_count < MIN_PACKET_COUNT) ? MIN_PACKET_COUNT : MAX_PACKET_COUNT;
+        } else {
+            count = new_count;
+        }
+    }
+    
+    // Update the count
+    config->packet_counts[class_id] = count;
+    printf("Updated Class %d packet count to %u\n", class_num, count);
+    
+    return 0;
+}
+
 /* Set class data type command */
 static int cmd_type(int argc, char **argv, scheduler_config_t *config)
 {
@@ -254,11 +311,49 @@ static int cmd_reset(int argc, char **argv, scheduler_config_t *config)
     config->class_types[CLASS_2] = DATA_TYPE_FLOAT;  // Class 2 - FLOAT
     config->class_types[CLASS_3] = DATA_TYPE_INT16;  // Class 3 - INT16
     
+    // Set default packet counts
+    config->packet_counts[CLASS_1] = DEFAULT_CLASS1_COUNT;
+    config->packet_counts[CLASS_2] = DEFAULT_CLASS2_COUNT;
+    config->packet_counts[CLASS_3] = DEFAULT_CLASS3_COUNT;
+    
     // Reset processing threshold
     config->processing_threshold = DEFAULT_PROCESSING_THRESHOLD;
     
     printf("All classes reset to default values.\n");
     printf("Processing threshold reset to %lu ms.\n", config->processing_threshold);
+    
+    return 0;
+}
+
+/* Set threshold command implementation */
+static int cmd_threshold(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting processing threshold");
+    
+    if (argc < 2) {
+        printf("Usage: threshold <value_ms>\n");
+        printf("       Use '-a' for auto value\n");
+        printf("Current threshold: %lu ms\n", config->processing_threshold);
+        return 1;
+    }
+    
+    uint32_t threshold = config->processing_threshold;
+    
+    if (strcmp(argv[1], "-a") == 0) {
+        // Auto-generate threshold
+        threshold = random_range(MIN_THRESHOLD, MAX_THRESHOLD);
+        printf("Auto-generated threshold: %lu ms\n", threshold);
+    } else {
+        threshold = atoi(argv[1]);
+        if (threshold < MIN_THRESHOLD || threshold > MAX_THRESHOLD) {
+            printf("Warning: Threshold outside recommended range [%d-%d]. Clamping.\n", 
+                   MIN_THRESHOLD, MAX_THRESHOLD);
+            threshold = (threshold < MIN_THRESHOLD) ? MIN_THRESHOLD : MAX_THRESHOLD;
+        }
+    }
+    
+    config->processing_threshold = threshold;
+    printf("Processing threshold set to %lu ms.\n", threshold);
     
     return 0;
 }
@@ -302,52 +397,23 @@ static int cmd_random(int argc, char **argv, scheduler_config_t *config)
         int rand_type_index = esp_random() % num_types;
         data_type_t data_type = possible_types[rand_type_index];
         
+        // Generate random packet count
+        uint16_t packet_count = random_range(MIN_PACKET_COUNT, MAX_PACKET_COUNT);
+        
         // Update values
         config->class_periods[i] = period;
         config->class_deadlines[i] = deadline;
         config->class_types[i] = data_type;
+        config->packet_counts[i] = packet_count;
         
-        printf("Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms (%.1f%% of period)\n", 
-               i + 1, type_names[rand_type_index], period, deadline, factor * 100);
+        printf("Class %d: Type=%s, Period=%lu ms, Deadline=%lu ms (%.1f%% of period), Count=%u\n", 
+               i + 1, type_names[rand_type_index], period, deadline, factor * 100, packet_count);
     }
     
     // Also generate a random threshold
     uint32_t threshold = random_range(MIN_THRESHOLD, MAX_THRESHOLD);
     config->processing_threshold = threshold;
     printf("Processing threshold: %lu ms\n", threshold);
-    
-    return 0;
-}
-
-/* Set threshold command implementation */
-static int cmd_threshold(int argc, char **argv, scheduler_config_t *config)
-{
-    ESP_LOGI(TAG, "Setting processing threshold");
-    
-    if (argc < 2) {
-        printf("Usage: threshold <value_ms>\n");
-        printf("       Use '-a' for auto value\n");
-        printf("Current threshold: %lu ms\n", config->processing_threshold);
-        return 1;
-    }
-    
-    uint32_t threshold = config->processing_threshold;
-    
-    if (strcmp(argv[1], "-a") == 0) {
-        // Auto-generate threshold
-        threshold = random_range(MIN_THRESHOLD, MAX_THRESHOLD);
-        printf("Auto-generated threshold: %lu ms\n", threshold);
-    } else {
-        threshold = atoi(argv[1]);
-        if (threshold < MIN_THRESHOLD || threshold > MAX_THRESHOLD) {
-            printf("Warning: Threshold outside recommended range [%d-%d]. Clamping.\n", 
-                   MIN_THRESHOLD, MAX_THRESHOLD);
-            threshold = (threshold < MIN_THRESHOLD) ? MIN_THRESHOLD : MAX_THRESHOLD;
-        }
-    }
-    
-    config->processing_threshold = threshold;
-    printf("Processing threshold set to %lu ms.\n", threshold);
     
     return 0;
 }
@@ -371,6 +437,7 @@ static const cmd_t commands[] = {
     {"status", "Show current class periods and deadlines", cmd_status},
     {"set", "Set period and deadline for a class", cmd_set_class},
     {"type", "Set data type for a class", cmd_type},
+    {"count", "Set packet count for a class", cmd_packet_count},
     {"threshold", "Set processing threshold", cmd_threshold},
     {"reset", "Reset all classes to default values", cmd_reset},
     {"random", "Set random periods and deadlines for all classes", cmd_random},
@@ -471,6 +538,11 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config)
     config->class_types[CLASS_1] = DATA_TYPE_INT32;  // Class 1 - INT32
     config->class_types[CLASS_2] = DATA_TYPE_FLOAT;  // Class 2 - FLOAT
     config->class_types[CLASS_3] = DATA_TYPE_INT16;  // Class 3 - INT16
+    
+    // Set default packet counts
+    config->packet_counts[CLASS_1] = DEFAULT_CLASS1_COUNT;
+    config->packet_counts[CLASS_2] = DEFAULT_CLASS2_COUNT;
+    config->packet_counts[CLASS_3] = DEFAULT_CLASS3_COUNT;
     
     // Set default processing threshold
     config->processing_threshold = DEFAULT_PROCESSING_THRESHOLD;

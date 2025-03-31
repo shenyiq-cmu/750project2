@@ -35,6 +35,13 @@
 #define DEFAULT_CLASS3_PERIOD 6000    // Default: 6 seconds
 #define DEFAULT_PROCESSING_THRESHOLD 1000  // Default: 1 second (1000ms)
 
+/* Packet Count Configuration */
+#define DEFAULT_CLASS1_COUNT 5    // Default packet count for Class 1
+#define DEFAULT_CLASS2_COUNT 4    // Default packet count for Class 2
+#define DEFAULT_CLASS3_COUNT 6    // Default packet count for Class 3
+#define MIN_PACKET_COUNT     1    // Minimum packet count
+#define MAX_PACKET_COUNT     100  // Maximum packet count
+
 #define MIN_PERIOD          1000      // Minimum period: 1 second
 #define MAX_PERIOD          10000     // Maximum period: 10 seconds
 #define MIN_DEADLINE_FACTOR 0.8       // Deadline can be 80% of period at minimum
@@ -69,8 +76,9 @@ typedef struct {
     uint32_t class_periods[MAX_CLASSES];   // Period for each class (ms)
     uint32_t class_deadlines[MAX_CLASSES]; // Deadline for each class (ms)
     data_type_t class_types[MAX_CLASSES];  // Data type for each class
+    uint16_t packet_counts[MAX_CLASSES];   // Packet count for each class
     uint32_t processing_threshold;         // Deadline processing threshold (ms)
-    bool start_program;                     // Flag to indicate if program should start
+    bool start_program;                    // Flag to indicate if program should start
 } scheduler_config_t;
 
 /**
