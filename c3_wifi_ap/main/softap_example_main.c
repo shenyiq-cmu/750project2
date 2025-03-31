@@ -2,7 +2,7 @@
  * ESP32 WiFi Access Point with Packet Receiver
  * 
  * This implementation creates a WiFi access point and then receives
- * and processes control and data packets from connected stations.
+ * and processes data packets from connected stations.
  */
 
 #include <string.h>
@@ -32,10 +32,10 @@
 #define RX_TASK_STACK_SIZE        4096
 #define RX_TASK_PRIORITY          5
 
-/* Packet type identifier */
-#define CONTROL_PACKET_SIGNATURE  0xA5B6C7D8
-
 static const char *TAG = "wifi-ap-receiver";
+
+/* Add a reception counter to track packet sequence */
+static uint32_t rx_packet_counter = 0;
 
 /* Class definitions */
 typedef enum {
@@ -53,26 +53,12 @@ typedef enum {
     DATA_TYPE_DOUBLE = 4,        // 64-bit double
 } data_type_t;
 
-/* Packet type definition */
-typedef enum __attribute__((packed)) {
-    PACKET_TYPE_CONTROL = 0,
-    PACKET_TYPE_DATA = 1
-} packet_type_t;
-
-/* Control packet structure - received before data transmission */
+/* Updated data packet header (now includes all necessary information) */
 typedef struct {
-    uint32_t signature;           // Signature to identify control packets
-    packet_type_t packet_type;    // Always PACKET_TYPE_CONTROL
-    uint8_t class_counts[MAX_CLASSES]; // Number of elements for each class
-    data_type_t class_types[MAX_CLASSES]; // Data type for each class
-} __attribute__((packed)) control_packet_t;
-
-/* Data packet header structure */
-typedef struct {
-    packet_type_t packet_type;    // Always PACKET_TYPE_DATA
-    uint8_t class_counts[MAX_CLASSES]; // Number of items for each class
-    uint16_t total_size;          // Total size of all data in bytes
-    uint32_t timestamp;           // Transmission timestamp
+    uint8_t class_counts[MAX_CLASSES];      // Number of items for each class
+    data_type_t class_types[MAX_CLASSES];   // Data type for each class
+    uint16_t total_size;                    // Total size of all data in bytes
+    uint32_t timestamp;                     // Transmission timestamp
 } __attribute__((packed)) data_packet_header_t;
 
 /* Receiver context */
@@ -80,15 +66,12 @@ typedef struct {
     SemaphoreHandle_t mutex;          // Mutex for operations
     TaskHandle_t receiver_task;       // Receiver task handle
     
-    // Class information from last control packet
+    // Class information from last received packet
     data_type_t class_types[MAX_CLASSES];
     uint8_t class_counts[MAX_CLASSES];
     
-    bool control_packet_received;     // Flag to indicate if we've received a control packet
-    
     // Statistics
     uint32_t packets_received;       // Total packets received
-    uint32_t control_packets;        // Control packets received
     uint32_t data_packets;           // Data packets received
     uint32_t error_packets;          // Packets with errors
     uint32_t current_time_ms;        // Current time in milliseconds
@@ -100,7 +83,6 @@ static receiver_context_t receiver_ctx;
 /* Function prototypes */
 static void receiver_task(void *pvParameters);
 static void wifi_promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type);
-static void process_control_packet(const uint8_t *data, size_t length);
 static void process_data_packet(const uint8_t *data, size_t length);
 
 /* Get the current time in milliseconds */
@@ -121,11 +103,9 @@ static void receiver_init(void)
 
     // Initialize statistics and flags
     receiver_ctx.packets_received = 0;
-    receiver_ctx.control_packets = 0;
     receiver_ctx.data_packets = 0;
     receiver_ctx.error_packets = 0;
     receiver_ctx.current_time_ms = 0;
-    receiver_ctx.control_packet_received = false;
     
     // Initialize class types to sensible defaults
     for (int i = 0; i < MAX_CLASSES; i++) {
@@ -183,8 +163,8 @@ void wifi_init_softap(void)
                                                         NULL));
 
     // Configure with hardcoded SSID and password to ensure match with station
-    const char* wifi_ssid = "myssid";  // MUST MATCH STA SSID
-    const char* wifi_password = "mypassword";  // MUST MATCH STA PASSWORD
+    const char* wifi_ssid = "myssid1";  // MUST MATCH STA SSID
+    const char* wifi_password = "mypassword1";  // MUST MATCH STA PASSWORD
     
     wifi_config_t wifi_config = {
         .ap = {
@@ -243,6 +223,7 @@ static void enable_promiscuous_mode(void)
 }
 
 /* WiFi promiscuous mode callback */
+/* WiFi promiscuous mode callback */
 static void wifi_promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 {
     if (type != WIFI_PKT_DATA) {
@@ -251,12 +232,20 @@ static void wifi_promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
     
     const wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
     const uint8_t *payload = pkt->payload;
+    const size_t pkt_len = pkt->rx_ctrl.sig_len;
     
     // Update current time
     receiver_ctx.current_time_ms = get_current_time_ms();
     
-    // We need at least 24 bytes for the basic 802.11 header
-    if (pkt->rx_ctrl.sig_len < 24) {
+    // Basic validation - we need at least 24 bytes for the basic 802.11 header
+    if (pkt_len < 24) {
+        ESP_LOGD(TAG, "Packet too small for 802.11 header: %d bytes", pkt_len);
+        return;
+    }
+    
+    // We need at least enough data for header + our data packet header
+    if (pkt_len < 24 + sizeof(data_packet_header_t)) {
+        ESP_LOGD(TAG, "Packet too small for data packet header: %d bytes", pkt_len);
         return;
     }
     
@@ -281,178 +270,199 @@ static void wifi_promiscuous_rx_cb(void *buf, wifi_promiscuous_pkt_type_t type)
     uint8_t our_mac[6];
     esp_wifi_get_mac(WIFI_IF_AP, our_mac);
     
-    // Check if packet is for us
+    // Check if packet is for us or broadcast
     bool is_for_us = true;
+    bool is_broadcast = true;
+    
     for (int i = 0; i < 6; i++) {
         if (destination_mac[i] != our_mac[i]) {
             is_for_us = false;
+        }
+        if (destination_mac[i] != 0xFF) {
+            is_broadcast = false;
+        }
+    }
+    
+    if (!is_for_us && !is_broadcast) {
+        return;  // Packet not intended for us
+    }
+    
+    // Skip the 802.11 header (24 bytes) to get to our payload
+    const uint8_t *data = payload + 24;
+    size_t data_len = pkt_len - 24;
+    
+    // Basic size validation for our header
+    if (data_len < sizeof(data_packet_header_t)) {
+        if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
+            receiver_ctx.error_packets++;
+            xSemaphoreGive(receiver_ctx.mutex);
+        }
+        ESP_LOGW(TAG, "Received packet too small: %d bytes (expected at least %d)", 
+                data_len, sizeof(data_packet_header_t));
+        return;
+    }
+    
+    // Do a basic validation of the data packet header
+    const data_packet_header_t *header = (const data_packet_header_t *)data;
+    
+    // Validate total size is reasonable
+    if (header->total_size > MAX_PACKET_SIZE) {
+        ESP_LOGW(TAG, "Invalid total size in header: %d (max allowed: %d)", 
+                 header->total_size, MAX_PACKET_SIZE);
+        if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
+            receiver_ctx.error_packets++;
+            xSemaphoreGive(receiver_ctx.mutex);
+        }
+        return;
+    }
+    
+    // Validate class types
+    bool valid_types = true;
+    for (int i = 0; i < MAX_CLASSES; i++) {
+        if (header->class_types[i] > DATA_TYPE_DOUBLE) {
+            valid_types = false;
             break;
         }
     }
     
-    if (!is_for_us) {
-        return;  // Packet not intended for us
+    if (!valid_types) {
+        ESP_LOGW(TAG, "Invalid class types in header");
+        if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
+            receiver_ctx.error_packets++;
+            xSemaphoreGive(receiver_ctx.mutex);
+        }
+        return;
     }
     
-    // Increment packet count
+    // Check if we have enough data for header + payload
+    if (data_len < sizeof(data_packet_header_t) + header->total_size) {
+        ESP_LOGW(TAG, "Insufficient data: header indicates %d data bytes, packet has %d bytes available",
+                 header->total_size, data_len - sizeof(data_packet_header_t));
+    }
+    
+    // Increment packet count only for valid packets
     if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
         receiver_ctx.packets_received++;
         xSemaphoreGive(receiver_ctx.mutex);
     }
     
-    // Skip the 802.11 header (24 bytes) to get to our payload
-    const uint8_t *data = payload + 24;
-    size_t data_len = pkt->rx_ctrl.sig_len - 24;
-    
-    // Debug: Log the packet size for every packet
-    ESP_LOGD(TAG, "Received packet size: %d bytes", data_len);
-    
-    // Make sure we have at least enough data to check the packet type
-    if (data_len < 4) {
-        if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
-            receiver_ctx.error_packets++;
-            xSemaphoreGive(receiver_ctx.mutex);
-        }
-        ESP_LOGW(TAG, "Received packet too small: %d bytes", data_len);
-        return;
-    }
-    
-    // Check for control packet signature
-    const uint32_t *signature = (const uint32_t *)data;
-    if (*signature == CONTROL_PACKET_SIGNATURE) {
-        if (data_len >= sizeof(control_packet_t)) {
-            process_control_packet(data, data_len);
-        } else {
-            ESP_LOGW(TAG, "Control packet too small: %d bytes (expected %d)", 
-                    data_len, sizeof(control_packet_t));
-        }
-    } else {
-        // If it's not a control packet, check if it's a data packet
-        if (data_len >= sizeof(data_packet_header_t)) {
-            // Check packet type field
-            const packet_type_t *type = (const packet_type_t *)(data);
-            if (*type == PACKET_TYPE_DATA) {
-                process_data_packet(data, data_len);
-            } else {
-                ESP_LOGW(TAG, "Unknown packet type: %d", *type);
-                if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
-                    receiver_ctx.error_packets++;
-                    xSemaphoreGive(receiver_ctx.mutex);
-                }
-            }
-        } else {
-            // Unexpected packet size
-            if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
-                receiver_ctx.error_packets++;
-                xSemaphoreGive(receiver_ctx.mutex);
-            }
-            ESP_LOGW(TAG, "Received packet with unexpected size: %d bytes", data_len);
-        }
-    }
-}
-
-/* Process a control packet */
-static void process_control_packet(const uint8_t *data, size_t length)
-{
-    // Make sure the packet is the right size
-    if (length < sizeof(control_packet_t)) {
-        ESP_LOGE(TAG, "Control packet too small: %d bytes", length);
-        return;
-    }
-    
-    // Cast to control packet structure
-    const control_packet_t *control = (const control_packet_t *)data;
-    
-    // Verify signature and packet type
-    if (control->signature != CONTROL_PACKET_SIGNATURE) {
-        ESP_LOGE(TAG, "Invalid control packet signature: 0x%08lx", (unsigned long)control->signature);
-        return;
-    }
-    
-    if (control->packet_type != PACKET_TYPE_CONTROL) {
-        ESP_LOGE(TAG, "Invalid packet type in control packet: %d", control->packet_type);
-        return;
-    }
-    
-    // Store control packet information
-    if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
-        // Copy class types and counts
-        for (int i = 0; i < MAX_CLASSES; i++) {
-            receiver_ctx.class_types[i] = control->class_types[i];
-            receiver_ctx.class_counts[i] = control->class_counts[i];
-        }
-        
-        receiver_ctx.control_packet_received = true;
-        receiver_ctx.control_packets++;
-        
-        xSemaphoreGive(receiver_ctx.mutex);
-    }
-    
-    ESP_LOGI(TAG, "Received control packet: Class1=%d(%d), Class2=%d(%d), Class3=%d(%d)",
-             control->class_counts[0], control->class_types[0],
-             control->class_counts[1], control->class_types[1],
-             control->class_counts[2], control->class_types[2]);
+    // Process the data packet
+    process_data_packet(data, data_len);
 }
 
 /* Process a data packet */
+/* Process a data packet */
 static void process_data_packet(const uint8_t *data, size_t length)
 {
-    // Make sure the packet is the right size
+    // Make sure the packet is at least as large as our header
     if (length < sizeof(data_packet_header_t)) {
-        ESP_LOGE(TAG, "Data packet too small: %d bytes", length);
+        ESP_LOGE(TAG, "Data packet too small: %d bytes (minimum size: %d)", 
+                 length, sizeof(data_packet_header_t));
         return;
     }
     
     // Cast to data packet header structure
     const data_packet_header_t *header = (const data_packet_header_t *)data;
     
-    // Verify packet type
-    if (header->packet_type != PACKET_TYPE_DATA) {
-        ESP_LOGE(TAG, "Invalid packet type in data packet: %d", header->packet_type);
+    // Validate total size
+    if (header->total_size > MAX_PACKET_SIZE) {
+        ESP_LOGE(TAG, "Invalid total size in header: %d (max allowed: %d)", 
+                 header->total_size, MAX_PACKET_SIZE);
         return;
     }
     
-    // Make sure we have received a control packet first
-    bool have_control_packet = false;
+    // Validate class types (must be between 0-4)
+    for (int i = 0; i < MAX_CLASSES; i++) {
+        if (header->class_types[i] > DATA_TYPE_DOUBLE) {
+            ESP_LOGE(TAG, "Invalid class type for class %d: %d", i, header->class_types[i]);
+            return;
+        }
+    }
+    
+    // Calculate expected total data size based on class counts and types
+    uint16_t expected_size = 0;
+    for (int i = 0; i < MAX_CLASSES; i++) {
+        if (header->class_counts[i] > 0) {
+            uint16_t element_size = 0;
+            switch (header->class_types[i]) {
+                case DATA_TYPE_INT8:   element_size = 1; break;
+                case DATA_TYPE_INT16:  element_size = 2; break;
+                case DATA_TYPE_INT32:  
+                case DATA_TYPE_FLOAT:  element_size = 4; break;
+                case DATA_TYPE_DOUBLE: element_size = 8; break;
+                default:               element_size = 0; break;  // Should not happen after validation
+            }
+            expected_size += element_size * header->class_counts[i];
+        }
+    }
+    
+    // Verify the total size in header matches our calculation
+    if (expected_size != header->total_size) {
+        ESP_LOGW(TAG, "Size mismatch: header says %d, calculated %d", 
+                 header->total_size, expected_size);
+    }
+    
+    // Verify actual received data size matches or exceeds what we need
+    if (length - sizeof(data_packet_header_t) < header->total_size) {
+        ESP_LOGW(TAG, "Data packet size mismatch: expected %d, got %d",
+                 header->total_size, length - sizeof(data_packet_header_t));
+        // We'll continue processing what we can
+    }
+
+    // Print transmission summary (matching the station's output format)
+    ESP_LOGI(TAG, "=============================================================");
+    ESP_LOGI(TAG, "Received packet #%lu", rx_packet_counter);
+    ESP_LOGI(TAG, "  Total data size: %d bytes", header->total_size);
+    ESP_LOGI(TAG, "  Sent data packet: Class1=%ditem(type%d), Class2=%ditem(type%d), Class3=%ditem(type%d)",
+                header->class_counts[0], header->class_types[0],
+                header->class_counts[1], header->class_types[1],
+                header->class_counts[2], header->class_types[2]);
+    // ESP_LOGI(TAG, "  Transmission timestamp: %lu", header->timestamp);
+    // ESP_LOGI(TAG, "  Reception timestamp: %lu", current_time);
+    // ESP_LOGI(TAG, "  Latency: %lu ms", latency);
+    
+    // Store class information from the packet
     if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
-        have_control_packet = receiver_ctx.control_packet_received;
+        // Copy class types and counts
+        for (int i = 0; i < MAX_CLASSES; i++) {
+            receiver_ctx.class_types[i] = header->class_types[i];
+            receiver_ctx.class_counts[i] = header->class_counts[i];
+        }
+        
         receiver_ctx.data_packets++;
         xSemaphoreGive(receiver_ctx.mutex);
-    }
-    
-    if (!have_control_packet) {
-        ESP_LOGW(TAG, "Received data packet before control packet - discarding");
-        return;
     }
     
     // Get data pointer (after header)
     const uint8_t *payload = data + sizeof(data_packet_header_t);
     
-    // Verify the total size matches what's in the header
-    if (length - sizeof(data_packet_header_t) != header->total_size) {
-        ESP_LOGW(TAG, "Data packet size mismatch: expected %d, got %d",
-                 header->total_size, length - sizeof(data_packet_header_t));
-    }
-    
     // Calculate latency (time from transmission to reception)
     uint32_t current_time = get_current_time_ms();
-    uint32_t latency = current_time - header->timestamp;
+    uint32_t packet_timestamp = header->timestamp;
     
-    ESP_LOGI(TAG, "Received data packet: Class1=%d, Class2=%d, Class3=%d, Size=%d, Latency=%lu ms",
-             header->class_counts[0], header->class_counts[1], header->class_counts[2],
+    // Validate timestamp (avoid huge latency values)
+    uint32_t latency;
+    if (current_time >= packet_timestamp) {
+        latency = current_time - packet_timestamp;
+        // If latency is unreasonably large (> 30 seconds), it's probably a bad timestamp
+        if (latency > 30000) {
+            ESP_LOGW(TAG, "Suspicious latency value: %lu ms, using 0", latency);
+            latency = 0;
+        }
+    } else {
+        // Handle timestamp rollover or invalid timestamps
+        ESP_LOGW(TAG, "Invalid timestamp: %lu > %lu, using 0", packet_timestamp, current_time);
+        latency = 0;
+    }
+    
+    ESP_LOGI(TAG, "Received data packet: Class1=%d(%d), Class2=%d(%d), Class3=%d(%d), Size=%d, Latency=%lu ms",
+             header->class_counts[0], header->class_types[0],
+             header->class_counts[1], header->class_types[1],
+             header->class_counts[2], header->class_types[2],
              header->total_size, latency);
     
     // Process the data for each class
     const uint8_t *class_data = payload;
-    
-    // Take mutex to get class types
-    data_type_t class_types[MAX_CLASSES];
-    if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
-        for (int i = 0; i < MAX_CLASSES; i++) {
-            class_types[i] = receiver_ctx.class_types[i];
-        }
-        xSemaphoreGive(receiver_ctx.mutex);
-    }
     
     // Process each class's data
     for (int class_id = 0; class_id < MAX_CLASSES; class_id++) {
@@ -462,79 +472,33 @@ static void process_data_packet(const uint8_t *data, size_t length)
         
         // Calculate element size based on data type
         uint16_t element_size = 0;
-        switch (class_types[class_id]) {
+        switch (header->class_types[class_id]) {
             case DATA_TYPE_INT8:   element_size = 1; break;
             case DATA_TYPE_INT16:  element_size = 2; break;
             case DATA_TYPE_INT32:
             case DATA_TYPE_FLOAT:  element_size = 4; break;
             case DATA_TYPE_DOUBLE: element_size = 8; break;
-            default:               element_size = 4; break;
+            default:
+                ESP_LOGE(TAG, "Unexpected data type %d for class %d", 
+                        header->class_types[class_id], class_id);
+                continue;  // Skip this class
         }
         
         // Calculate total size for this class
         uint16_t class_size = element_size * header->class_counts[class_id];
         
+        // Make sure we have enough data
+        size_t remaining_bytes = (payload + header->total_size) - class_data;
+        if (remaining_bytes < class_size) {
+            ESP_LOGW(TAG, "Not enough data for class %d: need %d bytes, have %d",
+                     class_id, class_size, remaining_bytes);
+            break;  // Stop processing
+        }
+        
         // Process based on data type
         ESP_LOGI(TAG, "  Class %d data (%d elements, type %d):",
-                 class_id + 1, header->class_counts[class_id], class_types[class_id]);
+                 class_id + 1, header->class_counts[class_id], header->class_types[class_id]);
         
-        // Display a few samples of the data based on type
-        switch (class_types[class_id]) {
-            case DATA_TYPE_INT8: {
-                const int8_t *values = (const int8_t *)class_data;
-                int display_count = header->class_counts[class_id] > 5 ? 5 : header->class_counts[class_id];
-                for (int i = 0; i < display_count; i++) {
-                    ESP_LOGI(TAG, "    [%d] = %d", i, values[i]);
-                }
-                break;
-            }
-            
-            case DATA_TYPE_INT16: {
-                const int16_t *values = (const int16_t *)class_data;
-                int display_count = header->class_counts[class_id] > 5 ? 5 : header->class_counts[class_id];
-                for (int i = 0; i < display_count; i++) {
-                    ESP_LOGI(TAG, "    [%d] = %d", i, values[i]);
-                }
-                break;
-            }
-            
-            case DATA_TYPE_INT32: {
-                const int32_t *values = (const int32_t *)class_data;
-                int display_count = header->class_counts[class_id] > 5 ? 5 : header->class_counts[class_id];
-                for (int i = 0; i < display_count; i++) {
-                    ESP_LOGI(TAG, "    [%d] = %ld", i, values[i]);
-                }
-                break;
-            }
-            
-            case DATA_TYPE_FLOAT: {
-                const float *values = (const float *)class_data;
-                int display_count = header->class_counts[class_id] > 5 ? 5 : header->class_counts[class_id];
-                for (int i = 0; i < display_count; i++) {
-                    ESP_LOGI(TAG, "    [%d] = %f", i, values[i]);
-                }
-                break;
-            }
-            
-            case DATA_TYPE_DOUBLE: {
-                const double *values = (const double *)class_data;
-                int display_count = header->class_counts[class_id] > 5 ? 5 : header->class_counts[class_id];
-                for (int i = 0; i < display_count; i++) {
-                    ESP_LOGI(TAG, "    [%d] = %f", i, values[i]);
-                }
-                break;
-            }
-            
-            default:
-                ESP_LOGI(TAG, "    (Data type not handled)");
-                break;
-        }
-        
-        // If there are more elements than we displayed, indicate this
-        if (header->class_counts[class_id] > 5) {
-            ESP_LOGI(TAG, "    ... (%d more elements not shown)",
-                     header->class_counts[class_id] - 5);
-        }
         
         // Move to next class's data
         class_data += class_size;
@@ -555,16 +519,20 @@ static void receiver_task(void *pvParameters)
         vTaskDelayUntil(&last_wake_time, stats_interval);
         
         // Print statistics
-        if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGI(TAG, "Receiver Statistics:");
-            ESP_LOGI(TAG, "  Packets received: %lu", receiver_ctx.packets_received);
-            ESP_LOGI(TAG, "  Control packets: %lu", receiver_ctx.control_packets);
-            ESP_LOGI(TAG, "  Data packets: %lu", receiver_ctx.data_packets);
-            ESP_LOGI(TAG, "  Error packets: %lu", receiver_ctx.error_packets);
-            ESP_LOGI(TAG, "  Control packet received: %s", 
-                     receiver_ctx.control_packet_received ? "YES" : "NO");
-            xSemaphoreGive(receiver_ctx.mutex);
-        }
+        // if (xSemaphoreTake(receiver_ctx.mutex, portMAX_DELAY) == pdTRUE) {
+        //     ESP_LOGI(TAG, "Receiver Statistics:");
+        //     ESP_LOGI(TAG, "  Packets received: %lu", receiver_ctx.packets_received);
+        //     ESP_LOGI(TAG, "  Data packets: %lu", receiver_ctx.data_packets);
+        //     ESP_LOGI(TAG, "  Error packets: %lu", receiver_ctx.error_packets);
+            
+        //     // Print current class configuration
+        //     ESP_LOGI(TAG, "  Class Types: Class1=%d, Class2=%d, Class3=%d",
+        //              receiver_ctx.class_types[0], receiver_ctx.class_types[1], receiver_ctx.class_types[2]);
+        //     ESP_LOGI(TAG, "  Last Packet Counts: Class1=%d, Class2=%d, Class3=%d",
+        //              receiver_ctx.class_counts[0], receiver_ctx.class_counts[1], receiver_ctx.class_counts[2]);
+            
+        //     xSemaphoreGive(receiver_ctx.mutex);
+        // }
     }
 }
 
