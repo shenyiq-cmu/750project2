@@ -881,7 +881,11 @@ void scheduler_init(scheduler_config_t *config)
                 ESP_LOGI(TAG, "  Burst period: %lu ms", config->random_packet_burst_period);
                 ESP_LOGI(TAG, "  Burst interval: %lu ms", config->random_packet_burst_interval);
                 ESP_LOGI(TAG, "  Packet size: %u", config->random_packet_count);
-                
+                ESP_LOGI(TAG, "  Burst mode: %s", config->random_packet_burst_enabled ? "ENABLED" : "DISABLED");
+                if (config->random_packet_burst_enabled) {
+                    ESP_LOGI(TAG, "  Burst settings: After %lu ms, switch to %lu ms intervals", 
+                            config->random_packet_burst_period, config->random_packet_burst_interval);
+                }
                 const char *type_str;
                 switch (config->random_packet_type) {
                     case DATA_TYPE_INT8:   type_str = "INT8";   break;
@@ -907,7 +911,6 @@ static uint32_t random_range(uint32_t min, uint32_t max)
     return min + (esp_random() % (max - min + 1));
 }
 
-/* Random packet generator task */
 static void random_packet_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Random packet task started");
@@ -932,13 +935,15 @@ static void random_packet_task(void *pvParameters)
     while (1) {
         uint32_t current_time = get_current_time_ms();
         
-        // Check if it's time to switch to burst mode
-        if (!burst_mode && current_time > start_time + config->random_packet_burst_period) {
+        // Only enter burst mode if it's enabled
+        if (config->random_packet_burst_enabled && 
+            !burst_mode && 
+            current_time > start_time + config->random_packet_burst_period) {
             burst_mode = true;
             burst_start_time = current_time;  // Record when burst mode started
             ESP_LOGW(TAG, "Random packet generator switching to burst mode");
         }
-        // Check if it's time to switch back to normal mode
+        // Only exit burst mode if we're in it
         else if (burst_mode && current_time > burst_start_time + burst_duration) {
             burst_mode = false;
             start_time = current_time;  // Reset start time for next burst cycle
@@ -948,14 +953,14 @@ static void random_packet_task(void *pvParameters)
         // Check if it's time to generate a packet
         if (current_time >= next_packet_time) {
             // Create random packet
-            ESP_LOGI(TAG, "Generating random packet (burst_mode: %d)", burst_mode);
+            ESP_LOGW(TAG, "create test for class 4, count %d", config->random_packet_count);
             create_test_packet(
                 CLASS_RANDOM,
                 config->random_packet_count,
                 config->random_packet_type
             );
             
-            // Schedule next packet
+            // Schedule next packet based on mode
             if (burst_mode) {
                 next_packet_time = current_time + config->random_packet_burst_interval;
             } else {

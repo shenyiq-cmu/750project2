@@ -63,6 +63,7 @@
 #define DEFAULT_RANDOM_PACKET_BURST_INTERVAL 50   // Default burst interval: 50ms
 #define DEFAULT_RANDOM_PACKET_COUNT 10             // Default packet size
 #define DEFAULT_RANDOM_PACKET_TYPE DATA_TYPE_INT32 // Default packet type
+#define DEFAULT_RANDOM_PACKET_BURST_ENABLED true  // Default: Burst mode enabled
 
 /* Forward declarations for scheduler types */
 typedef enum {
@@ -96,6 +97,7 @@ typedef struct {
     uint32_t random_packet_burst_period;   // Period after which to switch to burst mode (ms)
     uint32_t random_packet_burst_interval; // Interval between packets in burst mode (ms)
     uint16_t random_packet_count;           // Number of data elements in random packet
+    bool random_packet_burst_enabled;  // New field to enable/disable burst mode
     data_type_t random_packet_type;        // Data type for random packet
 } scheduler_config_t;
 

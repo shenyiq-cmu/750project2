@@ -236,26 +236,47 @@ static int cmd_random_packet_burst(int argc, char **argv, scheduler_config_t *co
     ESP_LOGI(TAG, "Setting random packet burst parameters");
     
     if (argc < 2) {
-        printf("Usage: rburst <period> <interval>\n");
+        printf("Usage: rburst [on|off] <period> <interval>\n");
+        printf("       Use 'on' to enable, 'off' to disable burst mode\n");
         printf("       <period> is the time (ms) after which to switch to burst mode\n");
         printf("       <interval> is the interval (ms) between packets in burst mode\n");
         printf("       Use '-a' for auto values\n");
+        printf("Current burst status: %s\n", config->random_packet_burst_enabled ? "ENABLED" : "DISABLED");
         printf("Current burst period: %lu ms\n", config->random_packet_burst_period);
         printf("Current burst interval: %lu ms\n", config->random_packet_burst_interval);
         return 1;
     }
     
-    // Parse burst period
-    if (strcmp(argv[1], "-a") == 0) {
-        // Auto-generate burst period
-        config->random_packet_burst_period = random_range(5000, 20000);
-        printf("Auto-generated burst period: %lu ms\n", config->random_packet_burst_period);
-    } else {
-        config->random_packet_burst_period = atoi(argv[1]);
-        printf("Set burst period to %lu ms\n", config->random_packet_burst_period);
+    // Check if first argument is on/off
+    if (strcasecmp(argv[1], "on") == 0) {
+        config->random_packet_burst_enabled = true;
+        printf("Burst mode enabled\n");
+        
+        // Shift arguments for period and interval
+        argc--;
+        argv++;
+    } else if (strcasecmp(argv[1], "off") == 0) {
+        config->random_packet_burst_enabled = false;
+        printf("Burst mode disabled\n");
+        
+        // Shift arguments for period and interval
+        argc--;
+        argv++;
     }
     
-    // Parse burst interval
+    // Parse burst period if provided
+    if (argc >= 2) {
+        if (strcmp(argv[1], "-a") == 0) {
+            // Auto-generate burst period
+            config->random_packet_burst_period = random_range(5000, 20000);
+            printf("Auto-generated burst period: %lu ms\n", config->random_packet_burst_period);
+        } else {
+            config->random_packet_burst_period = atoi(argv[1]);
+            printf("Set burst period to %lu ms\n", config->random_packet_burst_period);
+        }
+    }
+    
+    // Parse burst interval if provided
     if (argc >= 3) {
         if (strcmp(argv[2], "-a") == 0) {
             // Auto-generate burst interval
@@ -290,11 +311,13 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  %-10s - Set random packet size\n", "rsize");
     printf("  %-10s - Configure random packet burst parameters\n", "rburst");
     printf("  %-10s - Set random packet deadline\n", "rdeadline");
+    printf("  %-10s - Configure random packet burst parameters\n", "rburst");
     printf("  Example: rpacket on 500 2000  - Enable with min=500ms, max=2000ms\n");
     printf("  Example: rtype float         - Set type to FLOAT\n");
     printf("  Example: rsize 20            - Set size to 20 elements\n");
-    printf("  Example: rburst 10000 50     - After 10s, switch to 50ms intervals\n");
     printf("  Example: rdeadline 1500      - Set deadline to 1500ms\n");
+    printf("  Example: rburst on 10000 50   - Enable burst mode, after 10s switch to 50ms intervals\n");
+    printf("  Example: rburst off          - Disable burst mode\n");
     
     
     printf("\nClass-specific commands:\n");
@@ -358,16 +381,21 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
         case DATA_TYPE_DOUBLE: type_str = "DOUBLE"; break;
         default:               type_str = "UNKNOWN"; break;
     }
-    
+
     printf("\nRandom Packet Configuration: %s\n", 
-           config->random_packet_enabled ? "ENABLED" : "DISABLED");
+       config->random_packet_enabled ? "ENABLED" : "DISABLED");
     printf("  Initial interval: %lu-%lu ms\n", 
-           config->random_packet_min_interval, config->random_packet_max_interval);
-    printf("  Burst mode: After %lu ms, switch to %lu ms intervals\n", 
-           config->random_packet_burst_period, config->random_packet_burst_interval);
+        config->random_packet_min_interval, config->random_packet_max_interval);
+    printf("  Burst mode: %s\n", config->random_packet_burst_enabled ? "ENABLED" : "DISABLED");
+    if (config->random_packet_burst_enabled) {
+        printf("  Burst settings: After %lu ms, switch to %lu ms intervals\n", 
+            config->random_packet_burst_period, config->random_packet_burst_interval);
+    }
+
     printf("  Packet: Type=%s, Size=%u elements\n", 
-           type_str, config->random_packet_count);
+        type_str, config->random_packet_count);
     printf("  Deadline: %lu ms\n", config->class_deadlines[CLASS_RANDOM]);
+
     
     return 0;
 }
@@ -596,6 +624,7 @@ static int cmd_reset(int argc, char **argv, scheduler_config_t *config)
     config->random_packet_max_interval = DEFAULT_RANDOM_PACKET_MAX_INTERVAL;
     config->random_packet_burst_period = DEFAULT_RANDOM_PACKET_BURST_PERIOD;
     config->random_packet_burst_interval = DEFAULT_RANDOM_PACKET_BURST_INTERVAL;
+    config->random_packet_burst_enabled = DEFAULT_RANDOM_PACKET_BURST_ENABLED;
     config->random_packet_count = DEFAULT_RANDOM_PACKET_COUNT;
     config->random_packet_type = DEFAULT_RANDOM_PACKET_TYPE;
     
@@ -845,6 +874,7 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config)
     config->random_packet_burst_interval = DEFAULT_RANDOM_PACKET_BURST_INTERVAL;
     config->random_packet_count = DEFAULT_RANDOM_PACKET_COUNT;
     config->random_packet_type = DEFAULT_RANDOM_PACKET_TYPE;
+    config->random_packet_burst_enabled = DEFAULT_RANDOM_PACKET_BURST_ENABLED;
     
     // Display current configuration
     cmd_status(0, NULL, config);
