@@ -6,6 +6,8 @@
 #include "terminal_cmd.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_wifi.h"
+
 
 static const char *TAG = "terminal";
 
@@ -97,6 +99,47 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
     // Add threshold information
     printf("\nProcessing Threshold: %lu ms\n", config->processing_threshold);
     printf("(Tasks are processed when deadline is within this threshold)\n");
+
+    int8_t wifi_tx_power = 0;
+    if(esp_wifi_get_max_tx_power(&wifi_tx_power)==ESP_OK)
+        printf("Max TX power: %d\n", wifi_tx_power);
+
+    wifi_ps_type_t ps_mode;
+    if(esp_wifi_get_ps(&ps_mode)==ESP_OK){
+        if(ps_mode == WIFI_PS_NONE){
+            printf("WiFi power save mode: WIFI_PS_NONE\n");
+        }
+        else if(ps_mode == WIFI_PS_MIN_MODEM){
+            printf("WiFi power save mode: WIFI_PS_MIN_MODEM\n");
+        }
+        else{
+            printf("WiFi power save mode: WIFI_PS_MAX_MODEM\n");
+        }
+    }
+
+
+    uint8_t getprotocol;
+	if (esp_wifi_get_protocol(WIFI_IF_STA, &getprotocol) != ESP_OK) {
+		printf("Could not get protocol!\n");
+		//log_e("Could not get protocol! %d", err);
+		return false;
+	}
+	if (getprotocol & WIFI_PROTOCOL_11N) {
+		printf("WiFi_Protocol_11n\n");
+	}
+	if (getprotocol & WIFI_PROTOCOL_11G) {
+		printf("WiFi_Protocol_11g\n");
+	}
+	if (getprotocol & WIFI_PROTOCOL_11B) {
+		printf("WiFi_Protocol_11b\n");
+	}
+
+    wifi_ap_record_t ap_info;
+    if(esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK){
+        printf("AP RSSI = %d\n", ap_info.rssi);
+    }
+
+        
     
     return 0;
 }
