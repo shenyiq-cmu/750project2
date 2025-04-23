@@ -110,6 +110,7 @@ static void scheduler_task(void *pvParameters);
 static void process_packets(void);
 static esp_err_t send_data_packet(uint8_t *data, uint16_t size, uint8_t class_counts[MAX_CLASSES]);
 static void random_packet_task(void *pvParameters);
+void wifi_init_sta(scheduler_config_t *config);
 
 /* Queue functions */
 static void queue_init(packet_queue_t *queue) {
@@ -254,7 +255,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
 }
 
 /* Initialize WiFi in station mode and connect to AP */
-void wifi_init_sta(void)
+void wifi_init_sta(scheduler_config_t *config)
 {
     ESP_LOGI(TAG, "Initializing WiFi in station mode");
     
@@ -291,7 +292,8 @@ void wifi_init_sta(void)
     // Copy SSID and password to config
     strncpy((char*)wifi_config.sta.ssid, wifi_ssid, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char*)wifi_config.sta.password, wifi_password, sizeof(wifi_config.sta.password) - 1);
-    
+
+    // wifi mode configuration
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     wifi_config.sta.pmf_cfg.capable = true;
     wifi_config.sta.pmf_cfg.required = false;
@@ -304,6 +306,15 @@ void wifi_init_sta(void)
     // Configure WiFi and start
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    
+    // Apply WiFi settings from configuration
+    if (config != NULL) {
+        ESP_LOGI(TAG, "Applying custom WiFi settings");
+        esp_wifi_set_max_tx_power(config->wifi_tx_power);
+        esp_wifi_set_ps(config->wifi_ps_mode);
+        esp_wifi_set_protocol(WIFI_IF_STA, config->wifi_protocol);
+    }
+    
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "WiFi station initialization completed, waiting for connection");
@@ -976,7 +987,6 @@ static void random_packet_task(void *pvParameters)
 }
 
 
-
 /* Modified main application entry point */
 void app_main(void)
 {
@@ -988,19 +998,19 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize WiFi and connect to AP
-    ESP_LOGI(TAG, "Starting WiFi in station mode");
-    wifi_init_sta();
-    
-    // Short delay to allow WiFi to initialize fully
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
     // Initialize configuration structure
     scheduler_config_t config = {0};
     
     // Initialize the terminal and get configuration from user
     ESP_LOGI(TAG, "Waiting for user configuration via terminal...");
     terminal_init_and_configure(&config);
+    
+    // Initialize WiFi and connect to AP with the configuration
+    ESP_LOGI(TAG, "Starting WiFi in station mode");
+    wifi_init_sta(&config);
+    
+    // Short delay to allow WiFi to initialize fully
+    vTaskDelay(pdMS_TO_TICKS(2000));
     
     // Once user has completed configuration via terminal, initialize packet scheduler
     ESP_LOGI(TAG, "User configuration complete, initializing scheduler...");

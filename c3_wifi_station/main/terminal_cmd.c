@@ -291,6 +291,160 @@ static int cmd_random_packet_burst(int argc, char **argv, scheduler_config_t *co
     return 0;
 }
 
+/* Command to set WiFi TX power */
+static int cmd_wifi_tx_power(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting WiFi TX power");
+    
+    int8_t current_power = 0;
+    esp_wifi_get_max_tx_power(&current_power);
+    
+    if (argc < 2) {
+        printf("Usage: txpower <value>\n");
+        printf("       Value range: 8-84 (2dBm-20dBm, in 0.25dBm units)\n");
+        printf("       Use '-a' for auto value\n");
+        printf("Current TX power: %d\n", current_power);
+        return 1;
+    }
+    
+    int8_t power = config->wifi_tx_power;
+    
+    if (strcmp(argv[1], "-a") == 0) {
+        // Auto-generate power setting
+        power = 80;  // 20dBm, maximum value
+        printf("Auto-generated TX power: %d\n", power);
+    } else {
+        power = atoi(argv[1]);
+        if (power < 8 || power > 84) {
+            printf("Warning: TX power outside valid range [8-84]. Clamping.\n");
+            power = (power < 8) ? 8 : 84;
+        }
+    }
+    
+    config->wifi_tx_power = power;
+    
+    // Apply setting immediately if WiFi is started
+    esp_err_t ret = esp_wifi_set_max_tx_power(power);
+    if (ret == ESP_OK) {
+        printf("TX power set to %d (applied immediately)\n", power);
+    } else {
+        printf("TX power will be set to %d when WiFi starts\n", power);
+    }
+    
+    return 0;
+}
+
+/* Command to set WiFi power save mode */
+static int cmd_wifi_ps_mode(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting WiFi power save mode");
+    
+    wifi_ps_type_t current_mode;
+    esp_wifi_get_ps(&current_mode);
+    
+    if (argc < 2) {
+        printf("Usage: psmode <mode>\n");
+        printf("Available modes:\n");
+        printf("  none   - No power save (WIFI_PS_NONE)\n");
+        printf("  min    - Minimum power save (WIFI_PS_MIN_MODEM)\n");
+        printf("  max    - Maximum power save (WIFI_PS_MAX_MODEM)\n");
+        
+        // Show current mode
+        const char *mode_str;
+        switch (current_mode) {
+            case WIFI_PS_NONE: mode_str = "NONE"; break;
+            case WIFI_PS_MIN_MODEM: mode_str = "MIN_MODEM"; break;
+            case WIFI_PS_MAX_MODEM: mode_str = "MAX_MODEM"; break;
+            default: mode_str = "UNKNOWN"; break;
+        }
+        printf("Current power save mode: %s\n", mode_str);
+        return 1;
+    }
+    
+    wifi_ps_type_t mode = config->wifi_ps_mode;
+    
+    if (strcasecmp(argv[1], "none") == 0) {
+        mode = WIFI_PS_NONE;
+    } else if (strcasecmp(argv[1], "min") == 0) {
+        mode = WIFI_PS_MIN_MODEM;
+    } else if (strcasecmp(argv[1], "max") == 0) {
+        mode = WIFI_PS_MAX_MODEM;
+    } else {
+        printf("Error: Invalid power save mode '%s'.\n", argv[1]);
+        printf("Available modes: none, min, max\n");
+        return 1;
+    }
+    
+    config->wifi_ps_mode = mode;
+    
+    // Apply setting immediately if WiFi is started
+    esp_err_t ret = esp_wifi_set_ps(mode);
+    if (ret == ESP_OK) {
+        printf("Power save mode set to %s (applied immediately)\n", argv[1]);
+    } else {
+        printf("Power save mode will be set to %s when WiFi starts\n", argv[1]);
+    }
+    
+    return 0;
+}
+
+/* Command to set WiFi protocol */
+static int cmd_wifi_protocol(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting WiFi protocol");
+    
+    uint8_t current_protocol;
+    esp_wifi_get_protocol(WIFI_IF_STA, &current_protocol);
+    
+    if (argc < 2) {
+        printf("Usage: protocol <mode>\n");
+        printf("Available modes:\n");
+        printf("  b      - 802.11b only\n");
+        printf("  g      - 802.11g only\n");
+        printf("  gn      - 802.11g/n\n");
+        printf("  bg     - 802.11b/g\n");
+        printf("  bgn    - 802.11b/g/n (default)\n");
+        
+        // Show current protocol
+        printf("Current protocol: ");
+        if (current_protocol & WIFI_PROTOCOL_11B) printf("802.11b ");
+        if (current_protocol & WIFI_PROTOCOL_11G) printf("802.11g ");
+        if (current_protocol & WIFI_PROTOCOL_11N) printf("802.11n ");
+        printf("\n");
+        return 1;
+    }
+    
+    uint8_t protocol = 0;
+    
+    if (strcasecmp(argv[1], "b") == 0) {
+        protocol = WIFI_PROTOCOL_11B;
+    } else if (strcasecmp(argv[1], "g") == 0) {
+        protocol = WIFI_PROTOCOL_11G;
+    } else if (strcasecmp(argv[1], "gn") == 0) {
+        protocol = WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
+    } else if (strcasecmp(argv[1], "bg") == 0) {
+        protocol = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G;
+    } else if (strcasecmp(argv[1], "bgn") == 0) {
+        protocol = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
+    } else {
+        printf("Error: Invalid protocol mode '%s'.\n", argv[1]);
+        printf("Available modes: b, g, gn, bg, bgn\n");
+        return 1;
+    }
+    
+    config->wifi_protocol = protocol;
+    
+    // Apply setting immediately if WiFi is started
+    esp_err_t ret = esp_wifi_set_protocol(WIFI_IF_STA, protocol);
+    if (ret == ESP_OK) {
+        printf("WiFi protocol set to %s (applied immediately)\n", argv[1]);
+    } else {
+        printf("WiFi protocol will be set to %s when WiFi starts\n", argv[1]);
+    }
+    
+    return 0;
+}
+
 /* Help command implementation */
 static int cmd_help(int argc, char **argv, scheduler_config_t *config) 
 {
@@ -318,6 +472,14 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  Example: rdeadline 1500      - Set deadline to 1500ms\n");
     printf("  Example: rburst on 10000 50   - Enable burst mode, after 10s switch to 50ms intervals\n");
     printf("  Example: rburst off          - Disable burst mode\n");
+
+    printf("\nWiFi configuration commands:\n");
+    printf("  %-10s - Set WiFi transmit power (8-84)\n", "txpower");
+    printf("  %-10s - Set WiFi power save mode (none/min/max)\n", "psmode");
+    printf("  %-10s - Set WiFi protocol (b/bg/bgn)\n", "protocol");
+    printf("  Example: txpower 80     - Set TX power to 20dBm (maximum)\n");
+    printf("  Example: psmode min     - Use minimum power save\n");
+    printf("  Example: protocol bgn   - Use 802.11b/g/n protocols\n");
     
     
     printf("\nClass-specific commands:\n");
@@ -370,7 +532,7 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
     // Add threshold information
     printf("\nProcessing Threshold: %lu ms\n", config->processing_threshold);
     printf("(Tasks are processed when deadline is within this threshold)\n");
-    
+
     // Add random packet information
     const char *type_str;
     switch (config->random_packet_type) {
@@ -381,21 +543,83 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
         case DATA_TYPE_DOUBLE: type_str = "DOUBLE"; break;
         default:               type_str = "UNKNOWN"; break;
     }
-
+    
     printf("\nRandom Packet Configuration: %s\n", 
-       config->random_packet_enabled ? "ENABLED" : "DISABLED");
+           config->random_packet_enabled ? "ENABLED" : "DISABLED");
     printf("  Initial interval: %lu-%lu ms\n", 
-        config->random_packet_min_interval, config->random_packet_max_interval);
+           config->random_packet_min_interval, config->random_packet_max_interval);
     printf("  Burst mode: %s\n", config->random_packet_burst_enabled ? "ENABLED" : "DISABLED");
     if (config->random_packet_burst_enabled) {
         printf("  Burst settings: After %lu ms, switch to %lu ms intervals\n", 
-            config->random_packet_burst_period, config->random_packet_burst_interval);
+               config->random_packet_burst_period, config->random_packet_burst_interval);
+    }
+    printf("  Packet: Type=%s, Size=%u elements\n", 
+           type_str, config->random_packet_count);
+    printf("  Deadline: %lu ms\n", config->class_deadlines[CLASS_RANDOM]);
+    
+    // Add WiFi configuration information
+    printf("\nWiFi Configuration:\n");
+    
+    // Display configured TX power (from config)
+    printf("  TX power setting: %d (0.25dBm units)\n", config->wifi_tx_power);
+    
+    // Get and display current TX power (from hardware)
+    int8_t wifi_tx_power = 0;
+    if(esp_wifi_get_max_tx_power(&wifi_tx_power) == ESP_OK) {
+        printf("  Current TX power: %d\n", wifi_tx_power);
     }
 
-    printf("  Packet: Type=%s, Size=%u elements\n", 
-        type_str, config->random_packet_count);
-    printf("  Deadline: %lu ms\n", config->class_deadlines[CLASS_RANDOM]);
+    // Display configured power save mode (from config)
+    const char *ps_mode_str;
+    switch (config->wifi_ps_mode) {
+        case WIFI_PS_NONE: ps_mode_str = "NONE"; break;
+        case WIFI_PS_MIN_MODEM: ps_mode_str = "MIN_MODEM"; break;
+        case WIFI_PS_MAX_MODEM: ps_mode_str = "MAX_MODEM"; break;
+        default: ps_mode_str = "UNKNOWN"; break;
+    }
+    printf("  Power save mode setting: %s\n", ps_mode_str);
+    
+    // Get and display current power save mode (from hardware)
+    wifi_ps_type_t ps_mode;
+    if(esp_wifi_get_ps(&ps_mode) == ESP_OK) {
+        const char *current_ps_str;
+        switch (ps_mode) {
+            case WIFI_PS_NONE: current_ps_str = "NONE"; break;
+            case WIFI_PS_MIN_MODEM: current_ps_str = "MIN_MODEM"; break;
+            case WIFI_PS_MAX_MODEM: current_ps_str = "MAX_MODEM"; break;
+            default: current_ps_str = "UNKNOWN"; break;
+        }
+        printf("  Current power save mode: %s\n", current_ps_str);
+    }
 
+    // Display configured protocol (from config)
+    printf("  Protocol setting: ");
+    if (config->wifi_protocol & WIFI_PROTOCOL_11B) printf("802.11b ");
+    if (config->wifi_protocol & WIFI_PROTOCOL_11G) printf("802.11g ");
+    if (config->wifi_protocol & WIFI_PROTOCOL_11N) printf("802.11n ");
+    printf("\n");
+    
+    // Get and display current protocol (from hardware)
+    uint8_t getprotocol = 0;
+    printf("  Current protocol: ");
+    if (esp_wifi_get_protocol(WIFI_IF_STA, &getprotocol) == ESP_OK) {
+        if (getprotocol & WIFI_PROTOCOL_11B) printf("802.11b ");
+        if (getprotocol & WIFI_PROTOCOL_11G) printf("802.11g ");
+        if (getprotocol & WIFI_PROTOCOL_11N) printf("802.11n ");
+        printf("\n");
+    } else {
+        printf("Unknown (could not get protocol)\n");
+    }
+
+    // Display connection information
+    wifi_ap_record_t ap_info;
+    if(esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        printf("  Connected to AP: %s\n", ap_info.ssid);
+        printf("  AP RSSI: %d dBm\n", ap_info.rssi);
+        printf("  AP Channel: %d\n", ap_info.primary);
+    } else {
+        printf("  Not connected to an AP\n");
+    }
     
     return 0;
 }
@@ -627,6 +851,11 @@ static int cmd_reset(int argc, char **argv, scheduler_config_t *config)
     config->random_packet_burst_enabled = DEFAULT_RANDOM_PACKET_BURST_ENABLED;
     config->random_packet_count = DEFAULT_RANDOM_PACKET_COUNT;
     config->random_packet_type = DEFAULT_RANDOM_PACKET_TYPE;
+
+    // Reset WiFi parameters
+    config->wifi_tx_power = DEFAULT_WIFI_TX_POWER;
+    config->wifi_ps_mode = DEFAULT_WIFI_PS_MODE;
+    config->wifi_protocol = DEFAULT_WIFI_PROTOCOL;
     
     printf("All classes reset to default values.\n");
     printf("Processing threshold reset to %lu ms.\n", config->processing_threshold);
@@ -757,6 +986,9 @@ static const cmd_t commands[] = {
     {"rsize", "Set random packet size", cmd_random_packet_count},
     {"rburst", "Configure random packet burst parameters", cmd_random_packet_burst},
     {"rdeadline", "Set random packet deadline", cmd_random_packet_deadline},
+    {"txpower", "Set WiFi transmit power", cmd_wifi_tx_power},
+    {"psmode", "Set WiFi power save mode", cmd_wifi_ps_mode},
+    {"protocol", "Set WiFi protocol", cmd_wifi_protocol},
     {NULL, NULL, NULL}
 };
 
@@ -875,6 +1107,11 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config)
     config->random_packet_count = DEFAULT_RANDOM_PACKET_COUNT;
     config->random_packet_type = DEFAULT_RANDOM_PACKET_TYPE;
     config->random_packet_burst_enabled = DEFAULT_RANDOM_PACKET_BURST_ENABLED;
+
+    // Initialize WiFi parameters
+    config->wifi_tx_power = DEFAULT_WIFI_TX_POWER;
+    config->wifi_ps_mode = DEFAULT_WIFI_PS_MODE;
+    config->wifi_protocol = DEFAULT_WIFI_PROTOCOL;
     
     // Display current configuration
     cmd_status(0, NULL, config);
