@@ -43,7 +43,7 @@
 #define MAX_PACKET_COUNT     200  // Maximum packet count
 
 #define MIN_PERIOD          100      // Minimum period: 1 second
-#define MAX_PERIOD          10000     // Maximum period: 10 seconds
+#define MAX_PERIOD          1000000     // Maximum period: 1000 seconds
 #define MIN_DEADLINE_FACTOR 0.8       // Deadline can be 80% of period at minimum
 #define MAX_DEADLINE_FACTOR 4.0       // Deadline can be 120% of period at maximum
 #define MIN_THRESHOLD       50       // Minimum processing threshold: 100ms
@@ -56,11 +56,20 @@
 #define TYPE_OPTION_FLOAT "float"
 #define TYPE_OPTION_DOUBLE "double"
 
+/* Random Packet Configuration */
+#define DEFAULT_RANDOM_PACKET_MIN_INTERVAL 500    // Default min interval: 500ms
+#define DEFAULT_RANDOM_PACKET_MAX_INTERVAL 3000   // Default max interval: 3s
+#define DEFAULT_RANDOM_PACKET_BURST_PERIOD 30000  // Default burst period: 30s
+#define DEFAULT_RANDOM_PACKET_BURST_INTERVAL 50   // Default burst interval: 50ms
+#define DEFAULT_RANDOM_PACKET_COUNT 10             // Default packet size
+#define DEFAULT_RANDOM_PACKET_TYPE DATA_TYPE_INT32 // Default packet type
+
 /* Forward declarations for scheduler types */
 typedef enum {
     CLASS_1 = 0,                 // Class 1
     CLASS_2 = 1,                 // Class 2
     CLASS_3 = 2,                 // Class 3
+    CLASS_RANDOM = 3,
     MAX_CLASSES
 } class_id_t;
 
@@ -81,6 +90,15 @@ typedef struct {
     uint16_t packet_counts[MAX_CLASSES];   // Packet count for each class
     uint32_t processing_threshold;         // Deadline processing threshold (ms)
     bool start_program;                    // Flag to indicate if program should start
+
+    // Random packet generation parameters
+    bool random_packet_enabled;            // Enable random packet generation
+    uint32_t random_packet_min_interval;   // Minimum interval between random packets (ms)
+    uint32_t random_packet_max_interval;   // Maximum interval between random packets (ms)
+    uint32_t random_packet_burst_period;   // Period after which to switch to burst mode (ms)
+    uint32_t random_packet_burst_interval; // Interval between packets in burst mode (ms)
+    uint16_t random_packet_count;           // Number of data elements in random packet
+    data_type_t random_packet_type;        // Data type for random packet
 } scheduler_config_t;
 
 /**
