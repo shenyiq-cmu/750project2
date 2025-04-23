@@ -72,6 +72,17 @@
 #define DEFAULT_WIFI_PS_MODE     WIFI_PS_MIN_MODEM  // Default: Min modem
 #define DEFAULT_WIFI_PROTOCOL    (WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N)  // Default: 11bgn
 
+/* Adaptive TX power configuration */
+#define RSSI_EXCELLENT    -5    // -15 dBm or better: excellent signal
+#define RSSI_GOOD         -20    // -25 dBm or better: good signal
+#define RSSI_FAIR         -89    // -35 dBm or better: fair signal
+#define RSSI_POOR         -90   // -45 dBm or better: poor signal
+
+#define TX_POWER_MIN      8      // 2 dBm (minimum)
+#define TX_POWER_LOW      44     // 11 dBm
+#define TX_POWER_MEDIUM   60     // 15 dBm
+#define TX_POWER_HIGH     80     // 20 dBm (maximum)
+
 /* Forward declarations for scheduler types */
 typedef enum {
     CLASS_1 = 0,                 // Class 1
@@ -111,6 +122,11 @@ typedef struct {
     int8_t wifi_tx_power;          // WiFi transmit power
     wifi_ps_type_t wifi_ps_mode;   // WiFi power save mode
     uint8_t wifi_protocol;         // WiFi protocol bitmap
+
+    // adaptive tx power on rssi 
+    bool auto_tx_power;            // Whether to automatically adjust TX power based on RSSI
+    uint32_t auto_tx_power_interval;  // Interval (ms) for checking and adjusting TX power
+
 } scheduler_config_t;
 
 /**

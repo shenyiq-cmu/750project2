@@ -111,6 +111,7 @@ static void process_packets(void);
 static esp_err_t send_data_packet(uint8_t *data, uint16_t size, uint8_t class_counts[MAX_CLASSES]);
 static void random_packet_task(void *pvParameters);
 void wifi_init_sta(scheduler_config_t *config);
+static void adjust_tx_power_by_rssi(scheduler_config_t *config);
 
 /* Queue functions */
 static void queue_init(packet_queue_t *queue) {
@@ -217,9 +218,11 @@ static uint32_t find_earliest_deadline(void)
     return earliest_deadline;
 }
 /* WiFi event handler */
-static void event_handler(void* arg, esp_event_base_t event_base,
+static void event_handler(void* event_handler_arg, esp_event_base_t event_base,
                            int32_t event_id, void* event_data)
 {
+    scheduler_config_t* config = (scheduler_config_t*)event_handler_arg;  // Get config from arg
+    
     if (event_base == WIFI_EVENT) {
         switch (event_id) {
             case WIFI_EVENT_STA_START:
@@ -229,6 +232,13 @@ static void event_handler(void* arg, esp_event_base_t event_base,
                 
             case WIFI_EVENT_STA_CONNECTED:
                 ESP_LOGI(TAG, "!!!Connected to AP successfully!!!!");
+                // When connected, check if we should adjust TX power
+                if (config != NULL && config->auto_tx_power) {
+                    ESP_LOGI(TAG, "Auto TX power enabled, adjusting based on RSSI");
+                    // Wait a brief moment for RSSI to stabilize
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    adjust_tx_power_by_rssi(config);
+                }
                 break;
                 
             case WIFI_EVENT_STA_DISCONNECTED:
@@ -255,6 +265,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
 }
 
 /* Initialize WiFi in station mode and connect to AP */
+/* Initialize WiFi in station mode and connect to AP */
 void wifi_init_sta(scheduler_config_t *config)
 {
     ESP_LOGI(TAG, "Initializing WiFi in station mode");
@@ -268,19 +279,19 @@ void wifi_init_sta(scheduler_config_t *config)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Register event handlers
+    // Register event handlers, passing config as user data
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
+                                                       ESP_EVENT_ANY_ID,
+                                                       &event_handler,
+                                                       config,  // Pass config as event_handler_arg
+                                                       &instance_any_id));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
+                                                       IP_EVENT_STA_GOT_IP,
+                                                       &event_handler,
+                                                       config,  // Pass config as event_handler_arg
+                                                       &instance_got_ip));
 
     // Configure WiFi station with hardcoded SSID and password to ensure match
     // These MUST match exactly with the AP configuration
@@ -292,8 +303,7 @@ void wifi_init_sta(scheduler_config_t *config)
     // Copy SSID and password to config
     strncpy((char*)wifi_config.sta.ssid, wifi_ssid, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char*)wifi_config.sta.password, wifi_password, sizeof(wifi_config.sta.password) - 1);
-
-    // wifi mode configuration
+    
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     wifi_config.sta.pmf_cfg.capable = true;
     wifi_config.sta.pmf_cfg.required = false;
@@ -307,7 +317,7 @@ void wifi_init_sta(scheduler_config_t *config)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     
-    // Apply WiFi settings from configuration
+    // Apply WiFi settings from configuration if provided
     if (config != NULL) {
         ESP_LOGI(TAG, "Applying custom WiFi settings");
         esp_wifi_set_max_tx_power(config->wifi_tx_power);
@@ -763,6 +773,179 @@ static void packet_creator_task(void *pvParameters)
 }
 
 
+
+/* Helper function for generating random values within a range */
+static uint32_t random_range(uint32_t min, uint32_t max) 
+{
+    if (min >= max) {
+        return min;
+    }
+    return min + (esp_random() % (max - min + 1));
+}
+
+static void random_packet_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Random packet task started");
+    
+    // Get configuration from parameters
+    scheduler_config_t *config = (scheduler_config_t*)pvParameters;
+    if (config == NULL) {
+        ESP_LOGE(TAG, "No config provided to random packet task");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Track mode (normal or burst)
+    bool burst_mode = false;
+    uint32_t start_time = get_current_time_ms();
+    uint32_t burst_start_time = 0;  // Time when burst mode started
+    uint32_t burst_duration = 5000; // Duration of burst mode in ms (5 seconds)
+    uint32_t next_packet_time = start_time + random_range(
+        config->random_packet_min_interval, 
+        config->random_packet_max_interval);
+    
+    while (1) {
+        uint32_t current_time = get_current_time_ms();
+        
+        // Only enter burst mode if it's enabled
+        if (config->random_packet_burst_enabled && 
+            !burst_mode && 
+            current_time > start_time + config->random_packet_burst_period) {
+            burst_mode = true;
+            burst_start_time = current_time;  // Record when burst mode started
+            ESP_LOGW(TAG, "Random packet generator switching to burst mode");
+        }
+        // Only exit burst mode if we're in it
+        else if (burst_mode && current_time > burst_start_time + burst_duration) {
+            burst_mode = false;
+            start_time = current_time;  // Reset start time for next burst cycle
+            ESP_LOGW(TAG, "Random packet generator switching back to normal mode");
+        }
+        
+        // Check if it's time to generate a packet
+        if (current_time >= next_packet_time) {
+            // Create random packet
+            ESP_LOGW(TAG, "create test for class 4, count %d", config->random_packet_count);
+            create_test_packet(
+                CLASS_RANDOM,
+                config->random_packet_count,
+                config->random_packet_type
+            );
+            
+            // Schedule next packet based on mode
+            if (burst_mode) {
+                next_packet_time = current_time + config->random_packet_burst_interval;
+            } else {
+                next_packet_time = current_time + random_range(
+                    config->random_packet_min_interval, 
+                    config->random_packet_max_interval);
+            }
+        }
+        
+        // Sleep for a short time to avoid hogging CPU
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+/* Adjust TX power based on RSSI */
+static void adjust_tx_power_by_rssi(scheduler_config_t *config)
+{
+    // Get current RSSI
+    wifi_ap_record_t ap_info;
+    esp_err_t err = esp_wifi_sta_get_ap_info(&ap_info);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get AP info for TX power adjustment (error %d: %s)", 
+                 err, esp_err_to_name(err));
+        return;
+    }
+    
+    int8_t rssi = ap_info.rssi;
+    ESP_LOGI(TAG, "Current RSSI: %d dBm", rssi);
+    
+    int8_t new_tx_power = config->wifi_tx_power; // Start with current setting
+    
+    // Determine appropriate TX power based on RSSI
+    if (rssi >= RSSI_EXCELLENT) {
+        // Excellent signal, use lowest power
+        new_tx_power = TX_POWER_MIN;
+    } else if (rssi >= RSSI_GOOD) {
+        // Good signal, use low power
+        new_tx_power = TX_POWER_LOW;
+    } else if (rssi >= RSSI_FAIR) {
+        // Fair signal, use medium power
+        new_tx_power = TX_POWER_MEDIUM;
+    } else {
+        // Poor signal, use high power
+        new_tx_power = TX_POWER_HIGH;
+    }
+    
+    // Only change if different from current setting
+    if (new_tx_power != config->wifi_tx_power) {
+        ESP_LOGW(TAG, "***Adjusting TX power based on RSSI %d dBm: %d -> %d", 
+                 rssi, config->wifi_tx_power, new_tx_power);
+        
+        // Update config and apply setting
+        config->wifi_tx_power = new_tx_power;
+        esp_err_t ret = esp_wifi_set_max_tx_power(new_tx_power);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set TX power: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
+static void auto_tx_power_task(void *pvParameters)
+{
+    scheduler_config_t *config = (scheduler_config_t*)pvParameters;
+    if (config == NULL) {
+        ESP_LOGE(TAG, "No config provided to auto TX power task");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    TickType_t last_check_time = xTaskGetTickCount();
+    
+    while (1) {
+        // Only adjust if feature is enabled
+        if (config->auto_tx_power) {
+            // Reduce stack usage by simplifying the function call
+            wifi_ap_record_t ap_info;
+            if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+                int8_t rssi = ap_info.rssi;
+                ESP_LOGW(TAG, "->Current RSSI: %d dBm", rssi);
+                
+                // Determine appropriate TX power based on RSSI
+                int8_t new_tx_power = config->wifi_tx_power; // Start with current setting
+                
+                if (rssi >= RSSI_EXCELLENT) {
+                    new_tx_power = TX_POWER_MIN;
+                } else if (rssi >= RSSI_GOOD) {
+                    new_tx_power = TX_POWER_LOW;
+                } else if (rssi >= RSSI_FAIR) {
+                    new_tx_power = TX_POWER_MEDIUM;
+                } else {
+                    new_tx_power = TX_POWER_HIGH;
+                }
+                
+                // Only change if different from current setting
+                if (new_tx_power != config->wifi_tx_power) {
+                    ESP_LOGW(TAG, "***Adjusting TX power based on RSSI %d dBm: %d -> %d", 
+                             rssi, config->wifi_tx_power, new_tx_power);
+                    
+                    // Update config and apply setting
+                    config->wifi_tx_power = new_tx_power;
+                    esp_wifi_set_max_tx_power(new_tx_power);
+                }
+            }
+        }
+        
+        // Use the configurable interval
+        const TickType_t check_interval = pdMS_TO_TICKS(config->auto_tx_power_interval);
+        
+        // Sleep until next check
+        vTaskDelay(check_interval);
+    }
+}
+
 /* Initialize the packet scheduler */
 void scheduler_init(scheduler_config_t *config)
 {
@@ -910,82 +1093,36 @@ void scheduler_init(scheduler_config_t *config)
             }
         }
     }
-}
 
-
-/* Helper function for generating random values within a range */
-static uint32_t random_range(uint32_t min, uint32_t max) 
-{
-    if (min >= max) {
-        return min;
-    }
-    return min + (esp_random() % (max - min + 1));
-}
-
-static void random_packet_task(void *pvParameters)
-{
-    ESP_LOGI(TAG, "Random packet task started");
-    
-    // Get configuration from parameters
-    scheduler_config_t *config = (scheduler_config_t*)pvParameters;
-    if (config == NULL) {
-        ESP_LOGE(TAG, "No config provided to random packet task");
-        vTaskDelete(NULL);
-        return;
-    }
-    
-    // Track mode (normal or burst)
-    bool burst_mode = false;
-    uint32_t start_time = get_current_time_ms();
-    uint32_t burst_start_time = 0;  // Time when burst mode started
-    uint32_t burst_duration = 5000; // Duration of burst mode in ms (5 seconds)
-    uint32_t next_packet_time = start_time + random_range(
-        config->random_packet_min_interval, 
-        config->random_packet_max_interval);
-    
-    while (1) {
-        uint32_t current_time = get_current_time_ms();
-        
-        // Only enter burst mode if it's enabled
-        if (config->random_packet_burst_enabled && 
-            !burst_mode && 
-            current_time > start_time + config->random_packet_burst_period) {
-            burst_mode = true;
-            burst_start_time = current_time;  // Record when burst mode started
-            ESP_LOGW(TAG, "Random packet generator switching to burst mode");
-        }
-        // Only exit burst mode if we're in it
-        else if (burst_mode && current_time > burst_start_time + burst_duration) {
-            burst_mode = false;
-            start_time = current_time;  // Reset start time for next burst cycle
-            ESP_LOGW(TAG, "Random packet generator switching back to normal mode");
-        }
-        
-        // Check if it's time to generate a packet
-        if (current_time >= next_packet_time) {
-            // Create random packet
-            ESP_LOGW(TAG, "create test for class 4, count %d", config->random_packet_count);
-            create_test_packet(
-                CLASS_RANDOM,
-                config->random_packet_count,
-                config->random_packet_type
+    // Create auto TX power task if needed
+    if (config->auto_tx_power) {
+        // Clone config for the task since it will persist
+        scheduler_config_t *task_config = malloc(sizeof(scheduler_config_t));
+        if (task_config == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate memory for auto TX power task config");
+        } else {
+            // Copy the configuration
+            memcpy(task_config, config, sizeof(scheduler_config_t));
+            
+            // Create the task
+            BaseType_t ret = xTaskCreate(
+                auto_tx_power_task,           // Function that implements the task
+                "auto_tx_power_task",         // Text name for the task
+                4096,                         // Stack size in words
+                (void*)task_config,           // Parameter passed into the task
+                2,                            // Priority (lower than other tasks)
+                NULL                          // Not storing the task handle
             );
             
-            // Schedule next packet based on mode
-            if (burst_mode) {
-                next_packet_time = current_time + config->random_packet_burst_interval;
+            if (ret != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create auto TX power task");
+                free(task_config);
             } else {
-                next_packet_time = current_time + random_range(
-                    config->random_packet_min_interval, 
-                    config->random_packet_max_interval);
+                ESP_LOGI(TAG, "Auto TX power task created");
             }
         }
-        
-        // Sleep for a short time to avoid hogging CPU
-        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
-
 
 /* Modified main application entry point */
 void app_main(void)

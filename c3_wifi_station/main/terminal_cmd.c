@@ -33,6 +33,8 @@ static int cmd_random_packet(int argc, char **argv, scheduler_config_t *config);
 static int cmd_random_packet_type(int argc, char **argv, scheduler_config_t *config);
 static int cmd_random_packet_count(int argc, char **argv, scheduler_config_t *config);
 static int cmd_random_packet_burst(int argc, char **argv, scheduler_config_t *config);
+static void cmd_adjust_tx_power_by_rssi(scheduler_config_t *config);
+static int cmd_auto_tx_power(int argc, char **argv, scheduler_config_t *config); // adaptive tx power
 
 /* Helper function for generating random values */
 static uint32_t random_range(uint32_t min, uint32_t max) 
@@ -445,6 +447,120 @@ static int cmd_wifi_protocol(int argc, char **argv, scheduler_config_t *config)
     return 0;
 }
 
+/* Adjust TX power based on RSSI */
+static void cmd_adjust_tx_power_by_rssi(scheduler_config_t *config)
+{
+    // Get current RSSI
+    wifi_ap_record_t ap_info;
+    esp_err_t err = esp_wifi_sta_get_ap_info(&ap_info);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get AP info for TX power adjustment (error %d: %s)", 
+                 err, esp_err_to_name(err));
+        return;
+    }
+    
+    int8_t rssi = ap_info.rssi;
+    ESP_LOGW(TAG, "Current RSSI: %d dBm", rssi);
+    
+    int8_t new_tx_power = config->wifi_tx_power; // Start with current setting
+    
+    // Determine appropriate TX power based on RSSI
+    if (rssi >= RSSI_EXCELLENT) {
+        // Excellent signal, use lowest power
+        new_tx_power = TX_POWER_MIN;
+    } else if (rssi >= RSSI_GOOD) {
+        // Good signal, use low power
+        new_tx_power = TX_POWER_LOW;
+    } else if (rssi >= RSSI_FAIR) {
+        // Fair signal, use medium power
+        new_tx_power = TX_POWER_MEDIUM;
+    } else {
+        // Poor signal, use high power
+        new_tx_power = TX_POWER_HIGH;
+    }
+    
+    // Only change if different from current setting
+    if (new_tx_power != config->wifi_tx_power) {
+        ESP_LOGW(TAG, "Adjusting TX power based on RSSI %d dBm: %d -> %d", 
+                 rssi, config->wifi_tx_power, new_tx_power);
+        
+        // Update config and apply setting
+        config->wifi_tx_power = new_tx_power;
+        esp_err_t ret = esp_wifi_set_max_tx_power(new_tx_power);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set TX power: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
+/* Command to set auto TX power check interval */
+static int cmd_auto_tx_interval(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting auto TX power check interval");
+    
+    if (argc < 2) {
+        printf("Usage: autotx_interval <value_ms>\n");
+        printf("       Use '-a' for auto value\n");
+        printf("Current interval: %lu ms\n", config->auto_tx_power_interval);
+        return 1;
+    }
+    
+    uint32_t interval = config->auto_tx_power_interval;
+    
+    if (strcmp(argv[1], "-a") == 0) {
+        // Auto-generate interval between 1000-10000ms (1-10s)
+        interval = random_range(1000, 10000);
+        printf("Auto-generated interval: %lu ms\n", interval);
+    } else {
+        interval = atoi(argv[1]);
+        if (interval < 500 || interval > 30000) {
+            printf("Warning: Interval outside recommended range [500-30000]. Clamping.\n");
+            interval = (interval < 500) ? 500 : 30000;
+        }
+    }
+    
+    config->auto_tx_power_interval = interval;
+    printf("Auto TX power check interval set to %lu ms\n", interval);
+    
+    return 0;
+}
+
+/* Command to configure auto TX power adjustment */
+static int cmd_auto_tx_power(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Configuring auto TX power adjustment");
+    
+    if (argc < 2) {
+        printf("Usage: autotx [on|off]\n");
+        printf("       Use 'on' to enable, 'off' to disable automatic TX power adjustment\n");
+        printf("Current status: %s\n", config->auto_tx_power ? "ENABLED" : "DISABLED");
+        return 1;
+    }
+    
+    // Parse enable/disable
+    if (strcasecmp(argv[1], "on") == 0) {
+        config->auto_tx_power = true;
+        printf("Auto TX power adjustment enabled\n");
+        
+        // Check if WiFi is connected before trying to adjust TX power
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            // Immediately adjust TX power based on current RSSI
+            cmd_adjust_tx_power_by_rssi(config);
+        } else {
+            printf("Note: WiFi not connected yet. TX power will be adjusted once connected.\n");
+        }
+    } else if (strcasecmp(argv[1], "off") == 0) {
+        config->auto_tx_power = false;
+        printf("Auto TX power adjustment disabled\n");
+    } else {
+        printf("Error: First argument must be 'on' or 'off'\n");
+        return 1;
+    }
+    
+    return 0;
+}
+
 /* Help command implementation */
 static int cmd_help(int argc, char **argv, scheduler_config_t *config) 
 {
@@ -477,9 +593,13 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  %-10s - Set WiFi transmit power (8-84)\n", "txpower");
     printf("  %-10s - Set WiFi power save mode (none/min/max)\n", "psmode");
     printf("  %-10s - Set WiFi protocol (b/bg/bgn)\n", "protocol");
+    printf("  %-10s - Enable/disable auto TX power adjustment\n", "autotx");
+    printf("  %-10s - Set auto TX power check interval\n", "autotx_interval");
     printf("  Example: txpower 80     - Set TX power to 20dBm (maximum)\n");
     printf("  Example: psmode min     - Use minimum power save\n");
     printf("  Example: protocol bgn   - Use 802.11b/g/n protocols\n");
+    printf("  Example: autotx on      - Enable automatic TX power adjustment\n");
+    printf("  Example: autotx_interval 3000  - Check and adjust every 3 seconds\n");
     
     
     printf("\nClass-specific commands:\n");
@@ -620,6 +740,10 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
     } else {
         printf("  Not connected to an AP\n");
     }
+
+    // Display auto TX power adjustment information
+    printf("  Auto TX power adjustment: %s\n", config->auto_tx_power ? "ENABLED" : "DISABLED");
+    printf("  Auto TX power check interval: %lu ms\n", config->auto_tx_power_interval);
     
     return 0;
 }
@@ -989,6 +1113,8 @@ static const cmd_t commands[] = {
     {"txpower", "Set WiFi transmit power", cmd_wifi_tx_power},
     {"psmode", "Set WiFi power save mode", cmd_wifi_ps_mode},
     {"protocol", "Set WiFi protocol", cmd_wifi_protocol},
+    {"autotx", "Configure automatic TX power adjustment", cmd_auto_tx_power},
+    {"autotx_interval", "Set auto TX power check interval", cmd_auto_tx_interval},
     {NULL, NULL, NULL}
 };
 
@@ -1112,6 +1238,10 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config)
     config->wifi_tx_power = DEFAULT_WIFI_TX_POWER;
     config->wifi_ps_mode = DEFAULT_WIFI_PS_MODE;
     config->wifi_protocol = DEFAULT_WIFI_PROTOCOL;
+
+    // Initialize auto TX power adjustment
+    config->auto_tx_power = false;
+    config->auto_tx_power_interval = 5000; // Default: check every 5 seconds
     
     // Display current configuration
     cmd_status(0, NULL, config);
