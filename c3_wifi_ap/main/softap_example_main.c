@@ -26,7 +26,7 @@
 #define EXAMPLE_MAX_STA_CONN       CONFIG_ESP_MAX_STA_CONN
 
 /* Packet receiver configuration */
-#define MAX_CLASSES                3     // 3 classes (Class 1: 3s, Class 2: 5s, Class 3: 6s)
+#define MAX_CLASSES                4      // 3 classes (Class 1: 3s, Class 2: 5s, Class 3: 6s, Class 4: random)
 #define MAX_PACKET_SIZE           1400   // Maximum packet data size
 #define PROMISCUOUS_FILTER_MASK   WIFI_PROMIS_FILTER_MASK_DATA  // Only receive data frames
 #define RX_TASK_STACK_SIZE        4096
@@ -42,6 +42,7 @@ typedef enum {
     CLASS_1 = 0,                 // Class 1: 3-second period
     CLASS_2 = 1,                 // Class 2: 5-second period
     CLASS_3 = 2,                 // Class 3: 6-second period
+    CLASS_RANDOM = 3,            // Random packet
 } class_id_t;
 
 /* Data type definitions */
@@ -452,11 +453,12 @@ static void process_data_packet(const uint8_t *data, size_t length)
         latency = 0;
     }
     
-    ESP_LOGI(TAG, "Received data packet: Class1=%d(%d), Class2=%d(%d), Class3=%d(%d), Size=%d, Latency=%lu ms",
-             header->class_counts[0], header->class_types[0],
-             header->class_counts[1], header->class_types[1],
-             header->class_counts[2], header->class_types[2],
-             header->total_size, latency);
+    ESP_LOGI(TAG, "Received data packet: Class1=%d(%d), Class2=%d(%d), Class3=%d(%d), Random=%d(%d), Size=%d, Latency=%lu ms",
+         header->class_counts[0], header->class_types[0],
+         header->class_counts[1], header->class_types[1],
+         header->class_counts[2], header->class_types[2],
+         header->class_counts[3], header->class_types[3],
+         header->total_size, latency);
     
     // Process the data for each class
     const uint8_t *class_data = payload;
