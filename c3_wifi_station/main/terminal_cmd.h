@@ -29,7 +29,7 @@
 #define MAX_CMDLINE_LENGTH  256
 
 /* Class and Deadline Configuration */
-#define MAX_CLASSES         3     // Number of classes
+#define MAX_CLASSES         4     // Number of classes
 #define DEFAULT_CLASS1_PERIOD 3000    // Default: 3 seconds
 #define DEFAULT_CLASS2_PERIOD 5000    // Default: 5 seconds
 #define DEFAULT_CLASS3_PERIOD 6000    // Default: 6 seconds
@@ -56,11 +56,20 @@
 #define TYPE_OPTION_FLOAT "float"
 #define TYPE_OPTION_DOUBLE "double"
 
+/* Random Packet Configuration */
+#define DEFAULT_RANDOM_PACKET_MIN_INTERVAL 500    // Default min interval: 500ms
+#define DEFAULT_RANDOM_PACKET_MAX_INTERVAL 3000   // Default max interval: 3s
+#define DEFAULT_RANDOM_PACKET_BURST_PERIOD 10000  // Default burst period: 10s
+#define DEFAULT_RANDOM_PACKET_BURST_INTERVAL 50   // Default burst interval: 50ms
+#define DEFAULT_RANDOM_PACKET_COUNT 10             // Default packet size
+#define DEFAULT_RANDOM_PACKET_TYPE DATA_TYPE_INT32 // Default packet type
+
 /* Forward declarations for scheduler types */
 typedef enum {
     CLASS_1 = 0,                 // Class 1
     CLASS_2 = 1,                 // Class 2
     CLASS_3 = 2,                 // Class 3
+    CLASS_RANDOM = 3,            // Random packet class
 } class_id_t;
 
 typedef enum {
@@ -79,6 +88,15 @@ typedef struct {
     uint16_t packet_counts[MAX_CLASSES];   // Packet count for each class
     uint32_t processing_threshold;         // Deadline processing threshold (ms)
     bool start_program;                    // Flag to indicate if program should start
+    
+    // Random packet generation parameters
+    bool random_packet_enabled;            // Enable random packet generation
+    uint32_t random_packet_min_interval;   // Minimum interval between random packets (ms)
+    uint32_t random_packet_max_interval;   // Maximum interval between random packets (ms)
+    uint32_t random_packet_burst_period;   // Period after which to switch to burst mode (ms)
+    uint32_t random_packet_burst_interval; // Interval between packets in burst mode (ms)
+    uint16_t random_packet_count;           // Number of data elements in random packet
+    data_type_t random_packet_type;        // Data type for random packet
 } scheduler_config_t;
 
 /**

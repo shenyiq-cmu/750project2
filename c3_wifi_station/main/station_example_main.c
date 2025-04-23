@@ -28,7 +28,7 @@
 #define EXAMPLE_ESP_MAXIMUM_RETRY  CONFIG_ESP_MAXIMUM_RETRY
 
 /* Scheduler Configuration */
-#define MAX_CLASSES              3     // 3 classes (Class 1: 3s, Class 2: 5s, Class 3: 6s)
+#define MAX_CLASSES              4     // 3 classes (Class 1: 3s, Class 2: 5s, Class 3: 6s)
 #define MAX_PACKET_SIZE          1400  // Maximum packet data size
 #define MAX_QUEUE_SIZE           50    // Maximum packets per queue
 #define SCHEDULER_CHECK_INTERVAL_MS 50 // How often to check queues
@@ -109,6 +109,7 @@ static scheduler_context_t scheduler_ctx;
 static void scheduler_task(void *pvParameters);
 static void process_packets(void);
 static esp_err_t send_data_packet(uint8_t *data, uint16_t size, uint8_t class_counts[MAX_CLASSES]);
+static void random_packet_task(void *pvParameters);
 
 /* Queue functions */
 static void queue_init(packet_queue_t *queue) {
@@ -141,36 +142,6 @@ static bool queue_enqueue(packet_queue_t *queue, queue_packet_t *packet) {
         // Add to end
         queue->tail->next = new_node;
         queue->tail = new_node;
-    }
-    
-    queue->count++;
-    return true;
-}
-
-/* Add packet to the front of queue */
-static bool queue_enqueue_front(packet_queue_t *queue, queue_packet_t *packet) {
-    if (queue->count >= MAX_QUEUE_SIZE) {
-        return false;  // Queue is full
-    }
-    
-    queue_node_t *new_node = (queue_node_t*)malloc(sizeof(queue_node_t));
-    if (!new_node) {
-        return false;  // Memory allocation failed
-    }
-    
-    // Copy packet data
-    memcpy(&new_node->packet, packet, sizeof(queue_packet_t));
-    
-    // Add to front of queue
-    if (queue->count == 0) {
-        // First packet
-        new_node->next = NULL;
-        queue->head = new_node;
-        queue->tail = new_node;
-    } else {
-        // Add to front
-        new_node->next = queue->head;
-        queue->head = new_node;
     }
     
     queue->count++;
@@ -353,7 +324,6 @@ void wifi_init_sta(void)
         ESP_LOGE(TAG, "Unexpected event during connection");
     }
 }
-
 
 /* Set data type for a class */
 esp_err_t scheduler_set_class_type(class_id_t class_id, data_type_t data_type)
@@ -550,7 +520,8 @@ static void process_packets(void)
                 scheduler_ctx.packets_transmitted += 
                     (class_counts[0] > 0 ? 1 : 0) + 
                     (class_counts[1] > 0 ? 1 : 0) + 
-                    (class_counts[2] > 0 ? 1 : 0);
+                    (class_counts[2] > 0 ? 1 : 0) +
+                    (class_counts[3] > 0 ? 1 : 0);
                 xSemaphoreGive(scheduler_ctx.mutex);
             }
         }
@@ -655,11 +626,12 @@ static esp_err_t send_data_packet(uint8_t *data, uint16_t size, uint8_t class_co
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send data packet: %s", esp_err_to_name(ret));
     } else {
-        ESP_LOGI(TAG, "  Sent data packet: Class1=%ditem(type%d), Class2=%ditem(type%d), Class3=%ditem(type%d), Size=%d bytes",
-                header.class_counts[0], header.class_types[0],
-                header.class_counts[1], header.class_types[1],
-                header.class_counts[2], header.class_types[2],
-                size);
+        ESP_LOGI(TAG, "  Sent data packet: Class1=%ditem(type%d), Class2=%ditem(type%d), Class3=%ditem(type%d), Random=%ditem(type%d), Size=%d bytes",
+        header.class_counts[0], header.class_types[0],
+        header.class_counts[1], header.class_types[1],
+        header.class_counts[2], header.class_types[2],
+        header.class_counts[3], header.class_types[3],
+        size);
         ESP_LOGI(TAG,"================================================");
     }
     
@@ -707,8 +679,8 @@ void print_scheduler_stats(void)
         queue_length[i] = scheduler_ctx.packet_queues[i].count;
     }
     
-    ESP_LOGI(TAG, "  Queue status: Class1=%d, Class2=%d, Class3=%d", 
-            queue_length[0], queue_length[1], queue_length[2]);
+    ESP_LOGI(TAG, "  Queue status: Class1=%d, Class2=%d, Class3=%d, Random=%d", 
+        queue_length[0], queue_length[1], queue_length[2], queue_length[3]);
     
     xSemaphoreGive(scheduler_ctx.mutex);
 }
@@ -722,7 +694,7 @@ static void packet_creator_task(void *pvParameters)
     if (class_counts == NULL) {
         // If no parameters passed, use default values
         static uint16_t default_counts[MAX_CLASSES] = {
-            DEFAULT_CLASS1_COUNT, DEFAULT_CLASS2_COUNT, DEFAULT_CLASS3_COUNT
+            DEFAULT_CLASS1_COUNT, DEFAULT_CLASS2_COUNT, DEFAULT_CLASS3_COUNT, 0 // Zero for CLASS_RANDOM
         };
         class_counts = default_counts;
         ESP_LOGW(TAG, "No packet counts provided, using defaults");
@@ -755,8 +727,9 @@ static void packet_creator_task(void *pvParameters)
             TickType_t period_ticks = pdMS_TO_TICKS(period_ms);
             
             // Check if it's time to create a packet for this class
-            if ((current_time - last_class_time[class_id]) >= period_ticks) {
+            if (period_ms > 0 && class_counts[class_id] > 0 && (current_time - last_class_time[class_id]) >= period_ticks) {
                 // Create a test packet with the configured data type
+                ESP_LOGW(TAG, "create test for class %d, count %d", class_id+1, class_counts[class_id]);
                 create_test_packet(class_id, class_counts[class_id], data_type);
                 
                 last_class_time[class_id] = current_time;
@@ -874,7 +847,129 @@ void scheduler_init(scheduler_config_t *config)
     
     // Also log the processing threshold
     ESP_LOGI(TAG, "Processing threshold: %lu ms", scheduler_ctx.processing_threshold);
+
+    // Create random packet task if enabled
+    if (config->random_packet_enabled) {
+        // Set the type for random packets
+        scheduler_ctx.class_types[CLASS_RANDOM] = config->random_packet_type;
+
+        // Clone config for the task since it will persist
+        scheduler_config_t *task_config = malloc(sizeof(scheduler_config_t));
+        if (task_config == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate memory for random packet task config");
+        } else {
+            // Copy the configuration
+            memcpy(task_config, config, sizeof(scheduler_config_t));
+            
+            // Create the task
+            BaseType_t ret = xTaskCreate(
+                random_packet_task,              // Function that implements the task
+                "random_packet_task",            // Text name for the task
+                4096,                            // Stack size in words
+                (void*)task_config,              // Parameter passed into the task
+                3,                               // Priority (lower than other tasks)
+                NULL                             // Not storing the task handle
+            );
+            
+            if (ret != pdPASS) {
+                ESP_LOGE(TAG, "Failed to create random packet task");
+                free(task_config);
+            } else {
+                ESP_LOGI(TAG, "Random packet task created with parameters:");
+                ESP_LOGI(TAG, "  Min interval: %lu ms", config->random_packet_min_interval);
+                ESP_LOGI(TAG, "  Max interval: %lu ms", config->random_packet_max_interval);
+                ESP_LOGI(TAG, "  Burst period: %lu ms", config->random_packet_burst_period);
+                ESP_LOGI(TAG, "  Burst interval: %lu ms", config->random_packet_burst_interval);
+                ESP_LOGI(TAG, "  Packet size: %u", config->random_packet_count);
+                
+                const char *type_str;
+                switch (config->random_packet_type) {
+                    case DATA_TYPE_INT8:   type_str = "INT8";   break;
+                    case DATA_TYPE_INT16:  type_str = "INT16";  break;
+                    case DATA_TYPE_INT32:  type_str = "INT32";  break;
+                    case DATA_TYPE_FLOAT:  type_str = "FLOAT";  break;
+                    case DATA_TYPE_DOUBLE: type_str = "DOUBLE"; break;
+                    default:               type_str = "UNKNOWN"; break;
+                }
+                ESP_LOGI(TAG, "  Packet type: %s", type_str);
+            }
+        }
+    }
 }
+
+
+/* Helper function for generating random values within a range */
+static uint32_t random_range(uint32_t min, uint32_t max) 
+{
+    if (min >= max) {
+        return min;
+    }
+    return min + (esp_random() % (max - min + 1));
+}
+
+/* Random packet generator task */
+static void random_packet_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Random packet task started");
+    
+    // Get configuration from parameters
+    scheduler_config_t *config = (scheduler_config_t*)pvParameters;
+    if (config == NULL) {
+        ESP_LOGE(TAG, "No config provided to random packet task");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Track mode (normal or burst)
+    bool burst_mode = false;
+    uint32_t start_time = get_current_time_ms();
+    uint32_t burst_start_time = 0;  // Time when burst mode started
+    uint32_t burst_duration = 5000; // Duration of burst mode in ms (5 seconds)
+    uint32_t next_packet_time = start_time + random_range(
+        config->random_packet_min_interval, 
+        config->random_packet_max_interval);
+    
+    while (1) {
+        uint32_t current_time = get_current_time_ms();
+        
+        // Check if it's time to switch to burst mode
+        if (!burst_mode && current_time > start_time + config->random_packet_burst_period) {
+            burst_mode = true;
+            burst_start_time = current_time;  // Record when burst mode started
+            ESP_LOGW(TAG, "Random packet generator switching to burst mode");
+        }
+        // Check if it's time to switch back to normal mode
+        else if (burst_mode && current_time > burst_start_time + burst_duration) {
+            burst_mode = false;
+            start_time = current_time;  // Reset start time for next burst cycle
+            ESP_LOGW(TAG, "Random packet generator switching back to normal mode");
+        }
+        
+        // Check if it's time to generate a packet
+        if (current_time >= next_packet_time) {
+            // Create random packet
+            ESP_LOGI(TAG, "Generating random packet (burst_mode: %d)", burst_mode);
+            create_test_packet(
+                CLASS_RANDOM,
+                config->random_packet_count,
+                config->random_packet_type
+            );
+            
+            // Schedule next packet
+            if (burst_mode) {
+                next_packet_time = current_time + config->random_packet_burst_interval;
+            } else {
+                next_packet_time = current_time + random_range(
+                    config->random_packet_min_interval, 
+                    config->random_packet_max_interval);
+            }
+        }
+        
+        // Sleep for a short time to avoid hogging CPU
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 
 
 /* Modified main application entry point */

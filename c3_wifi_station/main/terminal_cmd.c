@@ -27,10 +27,247 @@ static int cmd_threshold(int argc, char **argv, scheduler_config_t *config);
 static int cmd_type(int argc, char **argv, scheduler_config_t *config);
 static int cmd_packet_count(int argc, char **argv, scheduler_config_t *config);
 
+
+/* Forward declarations for new terminal commands */
+static int cmd_random_packet(int argc, char **argv, scheduler_config_t *config);
+static int cmd_random_packet_type(int argc, char **argv, scheduler_config_t *config);
+static int cmd_random_packet_count(int argc, char **argv, scheduler_config_t *config);
+static int cmd_random_packet_burst(int argc, char **argv, scheduler_config_t *config);
+
 /* Helper function for generating random values */
 static uint32_t random_range(uint32_t min, uint32_t max) 
 {
     return min + (esp_random() % (max - min + 1));
+}
+
+/* Command to set deadline for random packets */
+static int cmd_random_packet_deadline(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting random packet deadline");
+    
+    if (argc < 2) {
+        printf("Usage: rdeadline <value_ms>\n");
+        printf("       Use '-a' for auto value\n");
+        printf("Current deadline: %lu ms\n", config->class_deadlines[CLASS_RANDOM]);
+        return 1;
+    }
+    
+    uint32_t deadline = config->class_deadlines[CLASS_RANDOM];
+    
+    if (strcmp(argv[1], "-a") == 0) {
+        // Auto-generate deadline between 500-3000ms
+        deadline = random_range(500, 3000);
+        printf("Auto-generated deadline: %lu ms\n", deadline);
+    } else {
+        deadline = atoi(argv[1]);
+        printf("Set deadline to %lu ms\n", deadline);
+    }
+    
+    config->class_deadlines[CLASS_RANDOM] = deadline;
+    
+    return 0;
+}
+
+/* Command to enable/disable and configure random packet generation */
+static int cmd_random_packet(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Configuring random packet generation");
+    
+    if (argc < 2) {
+        printf("Usage: random [on|off] [min_interval] [max_interval]\n");
+        printf("       Use 'on' to enable, 'off' to disable\n");
+        printf("       Specify intervals in milliseconds or '-a' for auto values\n");
+        printf("Current status: %s\n", config->random_packet_enabled ? "enabled" : "disabled");
+        printf("Min interval: %lu ms\n", config->random_packet_min_interval);
+        printf("Max interval: %lu ms\n", config->random_packet_max_interval);
+        return 1;
+    }
+    
+    // Parse enable/disable
+    if (strcmp(argv[1], "on") == 0) {
+        config->random_packet_enabled = true;
+        // Add this line to set a non-zero period for CLASS_RANDOM
+        config->class_periods[CLASS_RANDOM] = 1;  // Just a placeholder, random task controls timing
+        printf("Random packet generation enabled\n");
+    } else if (strcmp(argv[1], "off") == 0) {
+        config->random_packet_enabled = false;
+        // Reset period to 0 when disabled
+        config->class_periods[CLASS_RANDOM] = 0;
+        printf("Random packet generation disabled\n");
+        return 0;
+    }
+    
+    // Parse min interval
+    if (argc >= 3) {
+        if (strcmp(argv[2], "-a") == 0) {
+            // Auto-generate min interval
+            config->random_packet_min_interval = random_range(100, 1000);
+            printf("Auto-generated min interval: %lu ms\n", config->random_packet_min_interval);
+        } else {
+            config->random_packet_min_interval = atoi(argv[2]);
+            printf("Set min interval to %lu ms\n", config->random_packet_min_interval);
+        }
+    }
+    
+    // Parse max interval
+    if (argc >= 4) {
+        if (strcmp(argv[3], "-a") == 0) {
+            // Auto-generate max interval
+            config->random_packet_max_interval = random_range(
+                config->random_packet_min_interval + 500, 
+                config->random_packet_min_interval + 5000);
+            printf("Auto-generated max interval: %lu ms\n", config->random_packet_max_interval);
+        } else {
+            config->random_packet_max_interval = atoi(argv[3]);
+            printf("Set max interval to %lu ms\n", config->random_packet_max_interval);
+        }
+    }
+    
+    // Validate intervals
+    if (config->random_packet_min_interval >= config->random_packet_max_interval) {
+        printf("Warning: Min interval (%lu) >= max interval (%lu). Setting max = min + 1000\n",
+               config->random_packet_min_interval, config->random_packet_max_interval);
+        config->random_packet_max_interval = config->random_packet_min_interval + 1000;
+    }
+    
+    return 0;
+}
+
+/* Command to configure random packet type */
+static int cmd_random_packet_type(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting random packet data type");
+    
+    if (argc < 2) {
+        printf("Usage: rtype <datatype>\n");
+        printf("Available datatypes: int8, int16, int32, float, double\n");
+        printf("Example: rtype int32\n");
+        
+        // Show current type
+        const char *type_str;
+        switch (config->random_packet_type) {
+            case DATA_TYPE_INT8:   type_str = "INT8";   break;
+            case DATA_TYPE_INT16:  type_str = "INT16";  break;
+            case DATA_TYPE_INT32:  type_str = "INT32";  break;
+            case DATA_TYPE_FLOAT:  type_str = "FLOAT";  break;
+            case DATA_TYPE_DOUBLE: type_str = "DOUBLE"; break;
+            default:               type_str = "UNKNOWN"; break;
+        }
+        printf("Current type: %s\n", type_str);
+        return 1;
+    }
+    
+    // Parse data type
+    data_type_t new_type;
+    const char *type_name = argv[1];
+    
+    if (strcasecmp(type_name, TYPE_OPTION_INT8) == 0) {
+        new_type = DATA_TYPE_INT8;
+    } else if (strcasecmp(type_name, TYPE_OPTION_INT16) == 0) {
+        new_type = DATA_TYPE_INT16;
+    } else if (strcasecmp(type_name, TYPE_OPTION_INT32) == 0) {
+        new_type = DATA_TYPE_INT32;
+    } else if (strcasecmp(type_name, TYPE_OPTION_FLOAT) == 0) {
+        new_type = DATA_TYPE_FLOAT;
+    } else if (strcasecmp(type_name, TYPE_OPTION_DOUBLE) == 0) {
+        new_type = DATA_TYPE_DOUBLE;
+    } else {
+        printf("Error: Invalid data type '%s'.\n", type_name);
+        printf("Available datatypes: int8, int16, int32, float, double\n");
+        return 1;
+    }
+    
+    // Update the data type
+    config->random_packet_type = new_type;
+    config->class_types[CLASS_RANDOM] = new_type;  // Also update in the class types array
+    
+    // Show confirmation
+    const char *type_str;
+    switch (new_type) {
+        case DATA_TYPE_INT8:   type_str = "INT8";   break;
+        case DATA_TYPE_INT16:  type_str = "INT16";  break;
+        case DATA_TYPE_INT32:  type_str = "INT32";  break;
+        case DATA_TYPE_FLOAT:  type_str = "FLOAT";  break;
+        case DATA_TYPE_DOUBLE: type_str = "DOUBLE"; break;
+        default:               type_str = "UNKNOWN"; break;
+    }
+    
+    printf("Random packet type set to %s\n", type_str);
+    
+    return 0;
+}
+
+/* Command to configure random packet size */
+static int cmd_random_packet_count(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting random packet size");
+    
+    if (argc < 2) {
+        printf("Usage: rsize <value>\n");
+        printf("       Use '-a' for auto value\n");
+        printf("Current size: %u elements\n", config->random_packet_count);
+        return 1;
+    }
+    
+    uint16_t size = config->random_packet_count;
+    
+    if (strcmp(argv[1], "-a") == 0) {
+        // Auto-generate size
+        size = random_range(5, 50);
+        printf("Auto-generated packet size: %u elements\n", size);
+    } else {
+        // Parse user-provided value
+        size = atoi(argv[1]);
+        if (size < 1 || size > 200) {
+            printf("Warning: Size outside recommended range [1-200]. Clamping.\n");
+            size = (size < 1) ? 1 : 200;
+        }
+    }
+    
+    config->random_packet_count = size;
+    printf("Random packet size set to %u elements\n", size);
+    
+    return 0;
+}
+
+/* Command to configure random packet burst parameters */
+static int cmd_random_packet_burst(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Setting random packet burst parameters");
+    
+    if (argc < 2) {
+        printf("Usage: rburst <period> <interval>\n");
+        printf("       <period> is the time (ms) after which to switch to burst mode\n");
+        printf("       <interval> is the interval (ms) between packets in burst mode\n");
+        printf("       Use '-a' for auto values\n");
+        printf("Current burst period: %lu ms\n", config->random_packet_burst_period);
+        printf("Current burst interval: %lu ms\n", config->random_packet_burst_interval);
+        return 1;
+    }
+    
+    // Parse burst period
+    if (strcmp(argv[1], "-a") == 0) {
+        // Auto-generate burst period
+        config->random_packet_burst_period = random_range(5000, 20000);
+        printf("Auto-generated burst period: %lu ms\n", config->random_packet_burst_period);
+    } else {
+        config->random_packet_burst_period = atoi(argv[1]);
+        printf("Set burst period to %lu ms\n", config->random_packet_burst_period);
+    }
+    
+    // Parse burst interval
+    if (argc >= 3) {
+        if (strcmp(argv[2], "-a") == 0) {
+            // Auto-generate burst interval
+            config->random_packet_burst_interval = random_range(20, 200);
+            printf("Auto-generated burst interval: %lu ms\n", config->random_packet_burst_interval);
+        } else {
+            config->random_packet_burst_interval = atoi(argv[2]);
+            printf("Set burst interval to %lu ms\n", config->random_packet_burst_interval);
+        }
+    }
+    
+    return 0;
 }
 
 /* Help command implementation */
@@ -46,6 +283,19 @@ static int cmd_help(int argc, char **argv, scheduler_config_t *config)
     printf("  %-10s - Reset all classes to default values\n", "reset");
     printf("  %-10s - Set random periods and deadlines for all classes\n", "random");
     printf("  %-10s - Start the program with current configuration\n", "start");
+    
+    printf("\nRandom packet commands:\n");
+    printf("  %-10s - Enable the random packet (on/off) and packet generation\n", "rpacket");
+    printf("  %-10s - Set random packet data type\n", "rtype");
+    printf("  %-10s - Set random packet size\n", "rsize");
+    printf("  %-10s - Configure random packet burst parameters\n", "rburst");
+    printf("  %-10s - Set random packet deadline\n", "rdeadline");
+    printf("  Example: rpacket on 500 2000  - Enable with min=500ms, max=2000ms\n");
+    printf("  Example: rtype float         - Set type to FLOAT\n");
+    printf("  Example: rsize 20            - Set size to 20 elements\n");
+    printf("  Example: rburst 10000 50     - After 10s, switch to 50ms intervals\n");
+    printf("  Example: rdeadline 1500      - Set deadline to 1500ms\n");
+    
     
     printf("\nClass-specific commands:\n");
     printf("  set <class> <period> <deadline>  - Set period and deadline for a class (1-3)\n");
@@ -78,7 +328,7 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
 {
     ESP_LOGI(TAG, "Displaying current class configuration");
     printf("\nCurrent Class Configuration:\n");
-    for (int i = 0; i < MAX_CLASSES; i++) {
+    for (int i = 0; i < MAX_CLASSES; i++) {  // Show only the 3 regular classes + random
         const char *type_str;
         switch (config->class_types[i]) {
             case DATA_TYPE_INT8:   type_str = "INT8";   break;
@@ -97,6 +347,27 @@ static int cmd_status(int argc, char **argv, scheduler_config_t *config)
     // Add threshold information
     printf("\nProcessing Threshold: %lu ms\n", config->processing_threshold);
     printf("(Tasks are processed when deadline is within this threshold)\n");
+    
+    // Add random packet information
+    const char *type_str;
+    switch (config->random_packet_type) {
+        case DATA_TYPE_INT8:   type_str = "INT8";   break;
+        case DATA_TYPE_INT16:  type_str = "INT16";  break;
+        case DATA_TYPE_INT32:  type_str = "INT32";  break;
+        case DATA_TYPE_FLOAT:  type_str = "FLOAT";  break;
+        case DATA_TYPE_DOUBLE: type_str = "DOUBLE"; break;
+        default:               type_str = "UNKNOWN"; break;
+    }
+    
+    printf("\nRandom Packet Configuration: %s\n", 
+           config->random_packet_enabled ? "ENABLED" : "DISABLED");
+    printf("  Initial interval: %lu-%lu ms\n", 
+           config->random_packet_min_interval, config->random_packet_max_interval);
+    printf("  Burst mode: After %lu ms, switch to %lu ms intervals\n", 
+           config->random_packet_burst_period, config->random_packet_burst_interval);
+    printf("  Packet: Type=%s, Size=%u elements\n", 
+           type_str, config->random_packet_count);
+    printf("  Deadline: %lu ms\n", config->class_deadlines[CLASS_RANDOM]);
     
     return 0;
 }
@@ -318,9 +589,19 @@ static int cmd_reset(int argc, char **argv, scheduler_config_t *config)
     
     // Reset processing threshold
     config->processing_threshold = DEFAULT_PROCESSING_THRESHOLD;
+
+    // Reset random packet parameters
+    config->random_packet_enabled = false;
+    config->random_packet_min_interval = DEFAULT_RANDOM_PACKET_MIN_INTERVAL;
+    config->random_packet_max_interval = DEFAULT_RANDOM_PACKET_MAX_INTERVAL;
+    config->random_packet_burst_period = DEFAULT_RANDOM_PACKET_BURST_PERIOD;
+    config->random_packet_burst_interval = DEFAULT_RANDOM_PACKET_BURST_INTERVAL;
+    config->random_packet_count = DEFAULT_RANDOM_PACKET_COUNT;
+    config->random_packet_type = DEFAULT_RANDOM_PACKET_TYPE;
     
     printf("All classes reset to default values.\n");
     printf("Processing threshold reset to %lu ms.\n", config->processing_threshold);
+    printf("Random packet generation disabled and reset to default values.\n");
     
     return 0;
 }
@@ -382,7 +663,7 @@ static int cmd_random(int argc, char **argv, scheduler_config_t *config)
     };
     const int num_types = sizeof(possible_types) / sizeof(possible_types[0]);
     
-    for (int i = 0; i < MAX_CLASSES; i++) {
+    for (int i = 0; i < MAX_CLASSES - 1; i++) {
         // Generate random period
         uint32_t period = random_range(MIN_PERIOD, MAX_PERIOD);
         
@@ -442,6 +723,11 @@ static const cmd_t commands[] = {
     {"reset", "Reset all classes to default values", cmd_reset},
     {"random", "Set random periods and deadlines for all classes", cmd_random},
     {"start", "Start program with current configuration", cmd_start},
+    {"rpacket", "Configure random packet generation", cmd_random_packet},
+    {"rtype", "Set random packet data type", cmd_random_packet_type},
+    {"rsize", "Set random packet size", cmd_random_packet_count},
+    {"rburst", "Configure random packet burst parameters", cmd_random_packet_burst},
+    {"rdeadline", "Set random packet deadline", cmd_random_packet_deadline},
     {NULL, NULL, NULL}
 };
 
@@ -528,29 +814,42 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config)
     config->class_periods[CLASS_1] = DEFAULT_CLASS1_PERIOD;
     config->class_periods[CLASS_2] = DEFAULT_CLASS2_PERIOD;
     config->class_periods[CLASS_3] = DEFAULT_CLASS3_PERIOD;
+    config->class_periods[CLASS_RANDOM] = 0;  // Not periodic, controlled by random mechanism
     
     // Set default deadlines equal to periods
     config->class_deadlines[CLASS_1] = DEFAULT_CLASS1_PERIOD;
     config->class_deadlines[CLASS_2] = DEFAULT_CLASS2_PERIOD;
     config->class_deadlines[CLASS_3] = DEFAULT_CLASS3_PERIOD;
+    config->class_deadlines[CLASS_RANDOM] = 2000;  // Default deadline for random packets: 2s
     
     // Set default data types
     config->class_types[CLASS_1] = DATA_TYPE_INT32;  // Class 1 - INT32
     config->class_types[CLASS_2] = DATA_TYPE_FLOAT;  // Class 2 - FLOAT
     config->class_types[CLASS_3] = DATA_TYPE_INT16;  // Class 3 - INT16
+    config->class_types[CLASS_RANDOM] = DATA_TYPE_INT32;  // Random - INT32
     
     // Set default packet counts
     config->packet_counts[CLASS_1] = DEFAULT_CLASS1_COUNT;
     config->packet_counts[CLASS_2] = DEFAULT_CLASS2_COUNT;
     config->packet_counts[CLASS_3] = DEFAULT_CLASS3_COUNT;
+    config->packet_counts[CLASS_RANDOM] = 0;  // Not applicable for random packets
     
     // Set default processing threshold
     config->processing_threshold = DEFAULT_PROCESSING_THRESHOLD;
+
+    // Initialize random packet parameters
+    config->random_packet_enabled = false;  // Disabled by default
+    config->random_packet_min_interval = DEFAULT_RANDOM_PACKET_MIN_INTERVAL;
+    config->random_packet_max_interval = DEFAULT_RANDOM_PACKET_MAX_INTERVAL;
+    config->random_packet_burst_period = DEFAULT_RANDOM_PACKET_BURST_PERIOD;
+    config->random_packet_burst_interval = DEFAULT_RANDOM_PACKET_BURST_INTERVAL;
+    config->random_packet_count = DEFAULT_RANDOM_PACKET_COUNT;
+    config->random_packet_type = DEFAULT_RANDOM_PACKET_TYPE;
     
     // Display current configuration
     cmd_status(0, NULL, config);
     
-    // Main configuration loop
+    // Main configuration loopA
     char *line;
     while (!config->start_program) {
         /* Get a line using linenoise */
