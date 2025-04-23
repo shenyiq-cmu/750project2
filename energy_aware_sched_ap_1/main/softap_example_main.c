@@ -163,8 +163,8 @@ void wifi_init_softap(void)
                                                         NULL));
 
     // Configure with hardcoded SSID and password to ensure match with station
-    const char* wifi_ssid = "myssid1";  // MUST MATCH STA SSID
-    const char* wifi_password = "mypassword1";  // MUST MATCH STA PASSWORD
+    const char* wifi_ssid = "myssid2";  // MUST MATCH STA SSID
+    const char* wifi_password = "mypassword2";  // MUST MATCH STA PASSWORD
     
     wifi_config_t wifi_config = {
         .ap = {
@@ -186,7 +186,7 @@ void wifi_init_softap(void)
     strncpy((char*)wifi_config.ap.ssid, wifi_ssid, sizeof(wifi_config.ap.ssid) - 1);
     wifi_config.ap.ssid_len = strlen(wifi_ssid);
     strncpy((char*)wifi_config.ap.password, wifi_password, sizeof(wifi_config.ap.password) - 1);
-    
+
     if (strlen(wifi_password) == 0) {
         wifi_config.ap.authmode = WIFI_AUTH_OPEN;
     }

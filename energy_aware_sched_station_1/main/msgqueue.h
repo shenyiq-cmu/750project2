@@ -1,8 +1,10 @@
 #ifndef MSGQUEUE_H
 #define MSGQUEUE_H
 
-#include "types.h"
+#include "terminal_cmd.h"
 #include "freertos/FreeRTOS.h"
+#include <string.h>
+#include "freertos/task.h"
 
 #define MAX_PACKET_SIZE          1400  // Maximum packet data size
 #define MAX_QUEUE_SIZE           50    // Maximum packets per queue
