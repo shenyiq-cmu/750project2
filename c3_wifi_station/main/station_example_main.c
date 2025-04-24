@@ -264,7 +264,7 @@ static void event_handler(void* event_handler_arg, esp_event_base_t event_base,
     }
 }
 
-/* Initialize WiFi in station mode and connect to AP */
+
 /* Initialize WiFi in station mode and connect to AP */
 void wifi_init_sta(scheduler_config_t *config)
 {
@@ -320,12 +320,44 @@ void wifi_init_sta(scheduler_config_t *config)
     // Apply WiFi settings from configuration if provided
     if (config != NULL) {
         ESP_LOGI(TAG, "Applying custom WiFi settings");
-        esp_wifi_set_max_tx_power(config->wifi_tx_power);
-        esp_wifi_set_ps(config->wifi_ps_mode);
-        esp_wifi_set_protocol(WIFI_IF_STA, config->wifi_protocol);
+        
+        // Set power save mode
+        esp_err_t ret = esp_wifi_set_ps(config->wifi_ps_mode);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to set power save mode: %s", esp_err_to_name(ret));
+        } else {
+            ESP_LOGI(TAG, "Set power save mode to %d", config->wifi_ps_mode);
+        }
+        
+        // Set protocol
+        ret = esp_wifi_set_protocol(WIFI_IF_STA, config->wifi_protocol);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to set protocol: %s", esp_err_to_name(ret));
+        } else {
+            ESP_LOGI(TAG, "Set protocol to 0x%02x", config->wifi_protocol);
+        }
+        
+        // Set 11b rates if needed
+        if (config->disable_11b_rates) {
+            ret = esp_wifi_config_11b_rate(WIFI_IF_STA, true);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to disable 11b rates: %s", esp_err_to_name(ret));
+            } else {
+                ESP_LOGI(TAG, "Disabled 11b rates for pure G mode");
+            }
+        }
     }
     
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    // Set TX power
+        esp_err_t ret = esp_wifi_set_max_tx_power(config->wifi_tx_power);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to set TX power: %s", esp_err_to_name(ret));
+        } else {
+            ESP_LOGI(TAG, "Set TX power to %d", config->wifi_tx_power);
+        }
+        
 
     ESP_LOGI(TAG, "WiFi station initialization completed, waiting for connection");
 
@@ -1148,6 +1180,11 @@ void app_main(void)
     
     // Short delay to allow WiFi to initialize fully
     vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // Verify WiFi settings match configuration
+    ESP_LOGI(TAG, "---------Verifying WiFi settings----------");
+    verify_wifi_settings(&config);
+    ESP_LOGI(TAG, "---------Verifying WiFi settings----------");
     
     // Once user has completed configuration via terminal, initialize packet scheduler
     ESP_LOGI(TAG, "User configuration complete, initializing scheduler...");

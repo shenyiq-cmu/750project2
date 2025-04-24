@@ -402,10 +402,10 @@ static int cmd_wifi_protocol(int argc, char **argv, scheduler_config_t *config)
         printf("Usage: protocol <mode>\n");
         printf("Available modes:\n");
         printf("  b      - 802.11b only\n");
-        printf("  g      - 802.11g only\n");
-        printf("  gn      - 802.11g/n\n");
         printf("  bg     - 802.11b/g\n");
+        printf("  g      - 802.11g only (no 11b rates)\n");
         printf("  bgn    - 802.11b/g/n (default)\n");
+        printf("  gn     - 802.11g/n (no 11b rates)\n");
         
         // Show current protocol
         printf("Current protocol: ");
@@ -413,35 +413,59 @@ static int cmd_wifi_protocol(int argc, char **argv, scheduler_config_t *config)
         if (current_protocol & WIFI_PROTOCOL_11G) printf("802.11g ");
         if (current_protocol & WIFI_PROTOCOL_11N) printf("802.11n ");
         printf("\n");
+        
+        // Show configured protocol
+        printf("Configured protocol: ");
+        if (config->wifi_protocol & WIFI_PROTOCOL_11B) printf("802.11b ");
+        if (config->wifi_protocol & WIFI_PROTOCOL_11G) printf("802.11g ");
+        if (config->wifi_protocol & WIFI_PROTOCOL_11N) printf("802.11n ");
+        printf("\n");
+        
         return 1;
     }
     
     uint8_t protocol = 0;
+    bool disable_11b_rates = false;
     
     if (strcasecmp(argv[1], "b") == 0) {
+        // 802.11b only
         protocol = WIFI_PROTOCOL_11B;
-    } else if (strcasecmp(argv[1], "g") == 0) {
-        protocol = WIFI_PROTOCOL_11G;
-    } else if (strcasecmp(argv[1], "gn") == 0) {
-        protocol = WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
+        disable_11b_rates = false;
     } else if (strcasecmp(argv[1], "bg") == 0) {
+        // 802.11bg mode
         protocol = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G;
+        disable_11b_rates = false;
+    } else if (strcasecmp(argv[1], "g") == 0) {
+        // 802.11g only mode
+        protocol = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G;
+        disable_11b_rates = true;
     } else if (strcasecmp(argv[1], "bgn") == 0) {
+        // 802.11bgn mode
         protocol = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
+        disable_11b_rates = false;
+    } else if (strcasecmp(argv[1], "gn") == 0) {
+        // 802.11gn mode
+        protocol = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
+        disable_11b_rates = true;
     } else {
         printf("Error: Invalid protocol mode '%s'.\n", argv[1]);
-        printf("Available modes: b, g, gn, bg, bgn\n");
+        printf("Available modes: b, bg, g, bgn, gn\n");
         return 1;
     }
     
+    // Update the configuration
     config->wifi_protocol = protocol;
+    config->disable_11b_rates = disable_11b_rates;  // You'll need to add this field to your config struct
     
-    // Apply setting immediately if WiFi is started
-    esp_err_t ret = esp_wifi_set_protocol(WIFI_IF_STA, protocol);
-    if (ret == ESP_OK) {
-        printf("WiFi protocol set to %s (applied immediately)\n", argv[1]);
-    } else {
-        printf("WiFi protocol will be set to %s when WiFi starts\n", argv[1]);
+    printf("WiFi protocol will be set to %s when WiFi starts\n", argv[1]);
+    printf("Configured protocol: ");
+    if (config->wifi_protocol & WIFI_PROTOCOL_11B) printf("802.11b ");
+    if (config->wifi_protocol & WIFI_PROTOCOL_11G) printf("802.11g ");
+    if (config->wifi_protocol & WIFI_PROTOCOL_11N) printf("802.11n ");
+    printf("\n");
+    
+    if (disable_11b_rates) {
+        printf("11b rates will be disabled (pure G mode)\n");
     }
     
     return 0;
@@ -561,6 +585,22 @@ static int cmd_auto_tx_power(int argc, char **argv, scheduler_config_t *config)
     return 0;
 }
 
+static int cmd_verify_wifi(int argc, char **argv, scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Verifying WiFi settings");
+    esp_err_t ret = verify_wifi_settings(config);
+    
+    if (ret == ESP_OK) {
+        printf("All WiFi settings were successfully verified.\n");
+    } else if (ret == ESP_FAIL) {
+        printf("Some WiFi settings don't match the configuration.\n");
+        printf("Check the logs for details.\n");
+    } else {
+        printf("Error during verification: %s\n", esp_err_to_name(ret));
+    }
+    
+    return 0;
+}
 /* Help command implementation */
 static int cmd_help(int argc, char **argv, scheduler_config_t *config) 
 {
@@ -1115,6 +1155,7 @@ static const cmd_t commands[] = {
     {"protocol", "Set WiFi protocol", cmd_wifi_protocol},
     {"autotx", "Configure automatic TX power adjustment", cmd_auto_tx_power},
     {"autotx_interval", "Set auto TX power check interval", cmd_auto_tx_interval},
+    {"verify_wifi", "Verify current WiFi settings against configuration", cmd_verify_wifi},
     {NULL, NULL, NULL}
 };
 
@@ -1152,7 +1193,7 @@ bool process_command(char *line, scheduler_config_t *config)
 }
 
 /* Initialize terminal and process configuration */
-esp_err_t terminal_init_and_configure(scheduler_config_t *config) 
+esp_err_t terminal_init_and_configure(scheduler_config_t *config)
 {
     ESP_LOGI(TAG, "Initializing terminal interface");
     /* Configure UART parameters */
@@ -1238,6 +1279,7 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config)
     config->wifi_tx_power = DEFAULT_WIFI_TX_POWER;
     config->wifi_ps_mode = DEFAULT_WIFI_PS_MODE;
     config->wifi_protocol = DEFAULT_WIFI_PROTOCOL;
+    config->disable_11b_rates = false;
 
     // Initialize auto TX power adjustment
     config->auto_tx_power = false;
@@ -1267,4 +1309,144 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config)
     }
     
     return ESP_OK;
+}
+
+/**
+ * @brief Get current WiFi settings and verify they match configuration
+ * 
+ * @param config Pointer to scheduler configuration structure
+ * @return esp_err_t ESP_OK if all settings match, ESP_FAIL if any mismatch
+ */
+esp_err_t verify_wifi_settings(scheduler_config_t *config)
+{
+    ESP_LOGI(TAG, "Verifying WiFi settings against configuration...");
+    
+    bool all_match = true;
+    
+    // Check TX power
+    int8_t current_tx_power = 0;
+    esp_err_t ret = esp_wifi_get_max_tx_power(&current_tx_power);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get TX power: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    if (current_tx_power != config->wifi_tx_power) {
+        ESP_LOGW(TAG, "TX power mismatch! Config: %d, Actual: %d", 
+                config->wifi_tx_power, current_tx_power);
+        all_match = false;
+    } else {
+        ESP_LOGI(TAG, "TX power verified: %d", current_tx_power);
+    }
+    
+    // Check power save mode
+    wifi_ps_type_t current_ps_mode;
+    ret = esp_wifi_get_ps(&current_ps_mode);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get power save mode: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    if (current_ps_mode != config->wifi_ps_mode) {
+        const char *config_mode_str, *actual_mode_str;
+        
+        switch (config->wifi_ps_mode) {
+            case WIFI_PS_NONE: config_mode_str = "NONE"; break;
+            case WIFI_PS_MIN_MODEM: config_mode_str = "MIN_MODEM"; break;
+            case WIFI_PS_MAX_MODEM: config_mode_str = "MAX_MODEM"; break;
+            default: config_mode_str = "UNKNOWN"; break;
+        }
+        
+        switch (current_ps_mode) {
+            case WIFI_PS_NONE: actual_mode_str = "NONE"; break;
+            case WIFI_PS_MIN_MODEM: actual_mode_str = "MIN_MODEM"; break;
+            case WIFI_PS_MAX_MODEM: actual_mode_str = "MAX_MODEM"; break;
+            default: actual_mode_str = "UNKNOWN"; break;
+        }
+        
+        ESP_LOGW(TAG, "Power save mode mismatch! Config: %s, Actual: %s", 
+                config_mode_str, actual_mode_str);
+        all_match = false;
+    } else {
+        const char *mode_str;
+        switch (current_ps_mode) {
+            case WIFI_PS_NONE: mode_str = "NONE"; break;
+            case WIFI_PS_MIN_MODEM: mode_str = "MIN_MODEM"; break;
+            case WIFI_PS_MAX_MODEM: mode_str = "MAX_MODEM"; break;
+            default: mode_str = "UNKNOWN"; break;
+        }
+        ESP_LOGI(TAG, "Power save mode verified: %s", mode_str);
+    }
+    
+    // Check protocol
+    uint8_t current_protocol;
+    ret = esp_wifi_get_protocol(WIFI_IF_STA, &current_protocol);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get WiFi protocol: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    if (current_protocol != config->wifi_protocol) {
+        ESP_LOGW(TAG, "WiFi protocol mismatch! Config: 0x%02x, Actual: 0x%02x", 
+                config->wifi_protocol, current_protocol);
+        
+        ESP_LOGW(TAG, "Config protocols: %s%s%s", 
+                (config->wifi_protocol & WIFI_PROTOCOL_11B) ? "802.11b " : "",
+                (config->wifi_protocol & WIFI_PROTOCOL_11G) ? "802.11g " : "",
+                (config->wifi_protocol & WIFI_PROTOCOL_11N) ? "802.11n " : "");
+        
+        ESP_LOGW(TAG, "Actual protocols: %s%s%s", 
+                (current_protocol & WIFI_PROTOCOL_11B) ? "802.11b " : "",
+                (current_protocol & WIFI_PROTOCOL_11G) ? "802.11g " : "",
+                (current_protocol & WIFI_PROTOCOL_11N) ? "802.11n " : "");
+        
+        all_match = false;
+    } else {
+        ESP_LOGI(TAG, "WiFi protocol verified: %s%s%s", 
+                (current_protocol & WIFI_PROTOCOL_11B) ? "802.11b " : "",
+                (current_protocol & WIFI_PROTOCOL_11G) ? "802.11g " : "",
+                (current_protocol & WIFI_PROTOCOL_11N) ? "802.11n " : "");
+    }
+    
+    // Check if we're connected to the configured SSID
+    wifi_ap_record_t ap_info;
+    ret = esp_wifi_sta_get_ap_info(&ap_info);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Currently connected to AP: %s", ap_info.ssid);
+        ESP_LOGI(TAG, "RSSI: %d dBm", ap_info.rssi);
+        ESP_LOGI(TAG, "Channel: %d", ap_info.primary);
+        
+        // If auto TX power is enabled, check if current TX power makes sense for RSSI
+        if (config->auto_tx_power) {
+            ESP_LOGI(TAG, "Auto TX power is enabled, checking if TX power matches RSSI...");
+            
+            int8_t expected_tx_power = 0;
+            if (ap_info.rssi >= RSSI_EXCELLENT) {
+                expected_tx_power = TX_POWER_MIN;
+            } else if (ap_info.rssi >= RSSI_GOOD) {
+                expected_tx_power = TX_POWER_LOW;
+            } else if (ap_info.rssi >= RSSI_FAIR) {
+                expected_tx_power = TX_POWER_MEDIUM;
+            } else {
+                expected_tx_power = TX_POWER_HIGH;
+            }
+            
+            if (current_tx_power != expected_tx_power) {
+                ESP_LOGW(TAG, "TX power doesn't match expected value for RSSI %d dBm", ap_info.rssi);
+                ESP_LOGW(TAG, "Current: %d, Expected: %d", current_tx_power, expected_tx_power);
+            } else {
+                ESP_LOGI(TAG, "TX power correctly set for current RSSI");
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "Not connected to an AP, couldn't verify SSID");
+    }
+    
+    if (all_match) {
+        ESP_LOGI(TAG, "All WiFi settings match configuration!");
+        return ESP_OK;
+    } else {
+        ESP_LOGW(TAG, "Some WiFi settings don't match configuration.");
+        return ESP_FAIL;
+    }
 }

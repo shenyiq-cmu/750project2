@@ -68,9 +68,11 @@
 #define DEFAULT_RANDOM_PACKET_BURST_ENABLED true  // Default: Burst mode enabled
 
 // WiFi default configuration
+// WiFi default configuration
 #define DEFAULT_WIFI_TX_POWER    80      // Default: 20dBm (value 80 = 20dBm)
 #define DEFAULT_WIFI_PS_MODE     WIFI_PS_MIN_MODEM  // Default: Min modem
 #define DEFAULT_WIFI_PROTOCOL    (WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N)  // Default: 11bgn
+#define DEFAULT_DISABLE_11B_RATES false  // Default: 11b rates enabled
 
 /* Adaptive TX power configuration */
 #define RSSI_EXCELLENT    -5    // -15 dBm or better: excellent signal
@@ -122,6 +124,7 @@ typedef struct {
     int8_t wifi_tx_power;          // WiFi transmit power
     wifi_ps_type_t wifi_ps_mode;   // WiFi power save mode
     uint8_t wifi_protocol;         // WiFi protocol bitmap
+    bool disable_11b_rates;        // Whether to disable 11b rates for pure G mode
 
     // adaptive tx power on rssi 
     bool auto_tx_power;            // Whether to automatically adjust TX power based on RSSI
@@ -145,5 +148,13 @@ esp_err_t terminal_init_and_configure(scheduler_config_t *config);
  * @return true if program should start, false if more configuration needed
  */
 bool process_command(char *line, scheduler_config_t *config);
+
+/**
+ * @brief Get current WiFi settings and verify they match configuration
+ * 
+ * @param config Pointer to scheduler configuration structure
+ * @return esp_err_t ESP_OK if all settings match, ESP_FAIL if any mismatch
+ */
+esp_err_t verify_wifi_settings(scheduler_config_t *config);
 
 #endif /* TERMINAL_CMD_H */
