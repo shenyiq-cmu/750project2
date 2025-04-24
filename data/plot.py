@@ -34,14 +34,17 @@ def plot_samples(file_path):
 
     voltage = 5
 
-    wifi_volt = 0.035
+    wifi_curr_th = 0.03
+
+    cpu_curr = np.average(samples[samples <= wifi_curr_th])
 
     total_energy = np.sum(samples) * sample_interval * voltage
-    wifi_energy = np.sum(samples[samples > wifi_volt]) * sample_interval * voltage
-
+    wifi_energy = np.sum((samples[samples > wifi_curr_th]-cpu_curr)) * sample_interval * voltage
+    
+    print("Average Operating Current: ", cpu_curr, "A")
     print("Total energy consumption: ", total_energy, "J")
-    print("Wifi energy consumption: ", wifi_energy, "J")
+    print("Wifi energy consumption: ", wifi_energy, "J") # include both listen and transmit
 
 # Example usage
-file_path = "stress_5-4.csv"  # Replace with actual file path
+file_path = "random_4-2.csv"  # Replace with actual file path
 plot_samples(file_path)
